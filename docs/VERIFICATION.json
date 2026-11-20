@@ -8,9 +8,9 @@
     "platform": "Windows",
     "compiler": "MinGW GCC 15.2.0"
   },
-  "functional_source_sha256": "23a0ae67db968556fb467e960fa97363fb70911df4e9abd64e6082c8801f7c2b",
+  "functional_source_sha256": "b0e9450f7350f1763d03232b09459b67c4259da015620f5827087b73c2363714",
   "unit_tests": {
-    "count": 41,
+    "count": 42,
     "status": "PASS"
   },
   "source_provenance": {
@@ -396,6 +396,11 @@
   "packaging_regressions": {
     "raw_git_bytes_check": "PASS",
     "copy_executable_preserves_mode": "PASS",
-    "previous_linux_ci": "native builds passed; smoke failed because copyfile dropped execute bits; fixed with copy2, rerun required"
+    "previous_linux_ci": "PASS: 41 unit contracts, both VVenC builds, VVdeC build and full native smoke at 01b3927"
+  },
+  "portable_fingerprint_fix": {
+    "reason": "Windows Path sorting folds case; Linux does not",
+    "ordering": "relative POSIX path strings; case-sensitive",
+    "notebook_pin_ci_check": "scripts/verify_notebook.py, now required by CI"
   }
 }

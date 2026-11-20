@@ -2,7 +2,7 @@ import io,json,tempfile,unittest,zipfile,subprocess,os
 from pathlib import Path
 import numpy as np
 import torch
-from vvcrl.config import Profile,PPOConfig,FB,canonical,digest
+from vvcrl.config import Profile,PPOConfig,FB,canonical,digest,fingerprint
 from vvcrl.state import StateBuilder,areas,pool
 from vvcrl.model import ActorCritic,model_hash
 from vvcrl.ppo import PPO,gae
@@ -115,6 +115,14 @@ class RewardTests(unittest.TestCase):
     def test_noop_reward_exact_zero(self):self.assertEqual(reward(.2,.2,800,800,32,128000,1)['raw'],0)
 
 class EvidenceTests(unittest.TestCase):
+    def test_fingerprint_uses_portable_case_sensitive_path_order(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);(p/'vvcrl').mkdir();(p/'vendor/vvenc').mkdir(parents=True)
+            (p/'vvcrl/Z.py').write_bytes(b'Z');(p/'vvcrl/a.py').write_bytes(b'a');(p/'vendor/vvenc/CMakeLists.txt').write_bytes(b'cmake')
+            expected=hashlib.sha256(b'vvcrl/Z.pyZvvcrl/a.pyacmake').hexdigest()
+            self.assertEqual(fingerprint(p),expected)
+            (p/'vvcrl/a.py').write_bytes(b'changed');self.assertNotEqual(fingerprint(p),expected)
     def test_copied_encoder_preserves_executable_mode(self):
         with tempfile.TemporaryDirectory() as d:
             src=Path(d)/'source';dst=Path(d)/'target';src.write_bytes(b'fixture');src.chmod(0o755);copy_executable(src,dst)

@@ -59,7 +59,9 @@ def canonical(obj):return json.dumps(obj,sort_keys=True,separators=(',',':'),all
 def fingerprint(root):
     root=Path(root);h=hashlib.sha256()
     for directory in ('vvcrl','native','vendor/vvenc/source','vendor/vvenc/include','configs','scripts','tests'):
-        for p in sorted((root/directory).rglob('*')):
+        # Path ordering is case-folded on Windows but case-sensitive on POSIX.
+        # Sort portable relative path strings, never OS-specific Path objects.
+        for p in sorted((root/directory).rglob('*'),key=lambda p:p.relative_to(root).as_posix()):
             if p.is_file() and p.suffix in ('.py','.h','.cpp','.json'):
                 h.update(p.relative_to(root).as_posix().encode());h.update(p.read_bytes())
     h.update((root/'vendor/vvenc/CMakeLists.txt').read_bytes())

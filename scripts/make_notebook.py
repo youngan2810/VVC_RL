@@ -58,6 +58,10 @@ def generate():
     live(['git','-C',REPO,'checkout','--detach',commit])
     print('CHECKED_OUT_RAW_BYTES_PASS',verify_checkout(REPO))
     sys.path.insert(0,str(REPO))
+    # A failed earlier bootstrap may have imported config from the old commit.
+    import importlib
+    import vvcrl.config as _source_config
+    importlib.reload(_source_config)
     from vvcrl.config import fingerprint,atomic_json
     assert fingerprint(REPO)==EXPECTED_SOURCE_SHA256,'Functional source changed: obtain the matching notebook; do not overwrite this hash'
     print('EXACT_FUNCTIONAL_SOURCE_PASS',commit,EXPECTED_SOURCE_SHA256)
