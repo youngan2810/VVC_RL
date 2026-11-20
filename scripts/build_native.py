@@ -9,6 +9,12 @@ def run(args,log,cwd=None):
     print('BUILD',*[str(a) for a in args],flush=True)
     with Path(log).open('wb') as f:subprocess.run(list(map(str,args)),cwd=cwd,stdout=f,stderr=subprocess.STDOUT,check=True)
 
+def copy_executable(source,target):
+    # copyfile discards POSIX execute bits, leaving a successfully built encoder
+    # unusable on Linux. Preserve metadata and explicitly verify executability.
+    shutil.copy2(source,target)
+    if os.name!='nt' and not os.access(target,os.X_OK):raise PermissionError('Copied binary is not executable: '+str(target))
+
 def build(jobs=2):
     build=ROOT/'_build';build.mkdir(exist_ok=True);out=build/'bin';out.mkdir(exist_ok=True)
     vendor=ROOT/'vendor/vvenc';manifest=json.loads((ROOT/'native/online_manifest.json').read_text())
@@ -24,7 +30,7 @@ def build(jobs=2):
     if not vanilla.exists():
         shutil.copytree(vendor,vanilla,ignore=shutil.ignore_patterns('bin','lib','build','.git','__pycache__'))
         for n,h in manifest['before'].items():
-            original=ROOT/'native/originals'/Path(n).name
+            original=ROOT/'native/originals'/('vvenc_gitattributes.original' if n=='.gitattributes' else Path(n).name)
             if digest(original)!=h:raise ValueError('Original native source corrupted')
             shutil.copyfile(original,vanilla/n)
         for n in set(manifest['after'])-set(manifest['before']):(vanilla/n).unlink()
@@ -40,7 +46,7 @@ def build(jobs=2):
         run(['cmake','-S',source,'-B',directory,'-DCMAKE_BUILD_TYPE=Release',*extra],build/(name+'_configure.log'))
         run(['cmake','--build',directory,'--config','Release','--target','vvencapp','-j',str(jobs)],build/(name+'_build.log'))
         target=out/('vvenc_'+('rl' if name=='online' else 'vanilla')+suffix)
-        shutil.copyfile(source/'bin/release-static'/('vvencapp'+suffix),target)
+        copy_executable(source/'bin/release-static'/('vvencapp'+suffix),target)
     return {'encoder':str((out/('vvenc_rl'+suffix)).resolve()),'vanilla':str((out/('vvenc_vanilla'+suffix)).resolve())}
 
 if __name__=='__main__':

@@ -17,7 +17,8 @@ def verify():
     for n,h in manifest['after'].items():
         if digest(ROOT/'vendor/vvenc'/n)!=h:raise ValueError('Added native header differs')
     for n,h in manifest['before'].items():
-        if digest(ROOT/'native/originals'/Path(n).name)!=h:raise ValueError('Original source differs')
+        original=ROOT/'native/originals'/('vvenc_gitattributes.original' if n=='.gitattributes' else Path(n).name)
+        if digest(original)!=h:raise ValueError('Original source differs')
     if (ROOT/'native/VvcRlSession.h').read_bytes()!=(ROOT/'vendor/vvenc/source/Lib/EncoderLib/VvcRlSession.h').read_bytes():raise ValueError('Online header copies differ')
     return {'upstream_commit':tree['sha'],'upstream_blobs_checked':checked,'modified_or_added_files':len(manifest['after'])}
 

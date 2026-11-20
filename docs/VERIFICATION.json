@@ -8,15 +8,18 @@
     "platform": "Windows",
     "compiler": "MinGW GCC 15.2.0"
   },
-  "functional_source_sha256": "5278e2a6a44ae363361c160463f4641dd0fb4d146bb033309521dc165e0794d7",
+  "functional_source_sha256": "23a0ae67db968556fb467e960fa97363fb70911df4e9abd64e6082c8801f7c2b",
   "unit_tests": {
-    "count": 39,
+    "count": 41,
     "status": "PASS"
   },
   "source_provenance": {
     "official_vvenc_commit": "1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f",
     "official_blobs_checked": 807,
-    "native_modified_or_added": 8
+    "native_modified_or_added": 8,
+    "packaging_modified_files": [
+      "vendor/vvenc/.gitattributes"
+    ]
   },
   "binaries_sha256": {
     "encoder": "04ea168c2c1b7ff6bfd32113b85945cdd234ec8502e8214af29758520b183205",
@@ -389,5 +392,10 @@
     "training_ready": false,
     "reason": "CPU-only local host; locked MOV files and detector weights are not available locally"
   },
-  "next_required": "Run exact-source real-data Kaggle preflight; review SAFE evidence before enabling mini training. No task-accuracy or BD-rate improvement claim."
+  "next_required": "Run exact-source real-data Kaggle preflight; review SAFE evidence before enabling mini training. No task-accuracy or BD-rate improvement claim.",
+  "packaging_regressions": {
+    "raw_git_bytes_check": "PASS",
+    "copy_executable_preserves_mode": "PASS",
+    "previous_linux_ci": "native builds passed; smoke failed because copyfile dropped execute bits; fixed with copy2, rerun required"
+  }
 }

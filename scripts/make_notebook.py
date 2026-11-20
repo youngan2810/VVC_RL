@@ -1,8 +1,9 @@
 """Generate a preflight-first notebook bound to this exact functional source."""
-import json,sys,textwrap
+import json,sys,textwrap,inspect
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from vvcrl.config import fingerprint
+from vvcrl.repository import verify_checkout
 
 def generate():
     cells=[]
@@ -46,22 +47,23 @@ def generate():
         finally:
             if process.poll() is None:process.terminate();process.wait(timeout=30)
     ''')
-    code('''
+    code('import hashlib\n'+inspect.getsource(verify_checkout)+'\n'+textwrap.dedent('''
     import torch
     print('PYTORCH',torch.__version__,'CUDA',torch.version.cuda,'GPU_COUNT',torch.cuda.device_count())
     assert torch.cuda.is_available() and torch.cuda.device_count()>=2,'Enable two Kaggle GPUs'
     if not REPO.exists():live(['git','clone','--branch','main',REPOSITORY,REPO])
-    assert not subprocess.check_output(['git','-C',str(REPO),'status','--porcelain','--untracked-files=no'],text=True).strip(),'Tracked repository edits detected'
+    print('TRACKED_RAW_BYTES_PASS',verify_checkout(REPO))
     live(['git','-C',REPO,'fetch','origin','main'])
     commit=subprocess.check_output(['git','-C',str(REPO),'rev-parse','origin/main'],text=True).strip()
     live(['git','-C',REPO,'checkout','--detach',commit])
+    print('CHECKED_OUT_RAW_BYTES_PASS',verify_checkout(REPO))
     sys.path.insert(0,str(REPO))
     from vvcrl.config import fingerprint,atomic_json
     assert fingerprint(REPO)==EXPECTED_SOURCE_SHA256,'Functional source changed: obtain the matching notebook; do not overwrite this hash'
     print('EXACT_FUNCTIONAL_SOURCE_PASS',commit,EXPECTED_SOURCE_SHA256)
     TOOLS.mkdir(parents=True,exist_ok=True)
     atomic_json(TOOLS/'SOURCE_IDENTITY.json',{'commit':commit,'functional_sha256':EXPECTED_SOURCE_SHA256})
-    ''')
+    '''))
     code('''
     # Verify the bundled lock and all 16 Train + 4 Validation videos before builds.
     from vvcrl.locked.data import VideoCatalog

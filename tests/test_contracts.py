@@ -1,4 +1,4 @@
-import io,json,tempfile,unittest,zipfile
+import io,json,tempfile,unittest,zipfile,subprocess,os
 from pathlib import Path
 import numpy as np
 import torch
@@ -13,6 +13,8 @@ from vvcrl.gates import MANDATORY,write_gate,require_gate
 from vvcrl.train import save_checkpoint,load_checkpoint
 from vvcrl.locked.data import ASSETS,DATASET_SHA
 from vvcrl.controls import roi_action
+from vvcrl.repository import verify_checkout
+from scripts.build_native import copy_executable
 
 torch.set_num_threads(1)
 
@@ -113,6 +115,22 @@ class RewardTests(unittest.TestCase):
     def test_noop_reward_exact_zero(self):self.assertEqual(reward(.2,.2,800,800,32,128000,1)['raw'],0)
 
 class EvidenceTests(unittest.TestCase):
+    def test_copied_encoder_preserves_executable_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            src=Path(d)/'source';dst=Path(d)/'target';src.write_bytes(b'fixture');src.chmod(0o755);copy_executable(src,dst)
+            self.assertEqual(src.read_bytes(),dst.read_bytes())
+            if os.name!='nt':self.assertTrue(os.access(dst,os.X_OK))
+    def test_raw_git_verification_distinguishes_crlf_from_edits(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);subprocess.run(['git','init','-q',d],check=True);(p/'.gitattributes').write_bytes(b'* text=auto\n*.cpp text\n');(p/'a.cpp').write_bytes(b'int a;\r\n')
+            for name in ('.gitattributes','a.cpp'):
+                sha=subprocess.check_output(['git','-C',d,'hash-object','-w','--no-filters',name],text=True).strip()
+                subprocess.run(['git','-C',d,'update-index','--add','--cacheinfo','100644',sha,name],check=True)
+            tree=subprocess.check_output(['git','-C',d,'write-tree'],text=True).strip()
+            self.assertIn('a.cpp',subprocess.check_output(['git','-C',d,'diff','--name-only'],text=True))
+            self.assertEqual(verify_checkout(d,tree),2)
+            (p/'a.cpp').write_bytes(b'int changed;\r\n')
+            with self.assertRaises(ValueError):verify_checkout(d,tree)
     def test_safe_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
             d=Path(d);r=d/'run';r.mkdir();(r/'model.txt').write_text('proof');p=export_run(r,d/'safe.zip');import_run(p,d/'restored');self.assertEqual((d/'restored/model.txt').read_text(),'proof')
