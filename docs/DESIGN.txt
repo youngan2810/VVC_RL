@@ -1,0 +1,228 @@
+ĐẶC TẢ NGHIÊN CỨU STATE – ACTION – REWARD, V1
+Ngày: 20/11/2026
+Trạng thái: đặc tả trước triển khai, chưa build Agent, chưa training
+
+0. QUYẾT ĐỊNH VÀ MỨC ĐỘ BẰNG CHỨNG
+
+Thuật toán đã chốt: PPO-Clip + GAE; Actor Multi-Categorical.
+Phạm vi: phần bù QP theo CTU trên nền QPA + native rate control của VVenC; Object Detection lớp car trước. Không Partition/MTS/multitask trong V1.
+
+ĐÃ KIỂM CHỨNG: no-op instrumentation trùng bitstream vanilla trên fixture; integer delta ±2 đi vào QG, lambda đồng bộ, bitstream/reconstruction phản ứng; độc lập VVdeC/native reconstruction parity đã PASS trong runtime. Kiểm chứng dataset:2 validation clip×64frame×120kbps, CTU128. Fixed controls có3 seed,2 kiểu map, giữ histogram/diện tích và thống kê biến thiên action từng cặp frame.650 file,53 lượt encode,24 điểm chọn,16 cặp so sánh chính đã được đối chiếu. Phân bổ ROI có lợi ở A, không luôn thắng QPA ở B; uniform là đối chứng mạnh.
+
+CHƯA CHỨNG MINH: Agent PPO mới có học hay thắng heuristic; QP -1/+1 tại native hook; state giao tiếp online; credit assignment theo vùng; thuật toán tốt nhất; hiệu quả tổng quát; annotated mAP/BD-rate. ±1 là action yêu cầu kiểm thử trước training, không coi đã PASS từ ±2.
+
+Các feature, reward và tham số dưới đây là thiết kế đề xuất có thể triển khai, không phải kết quả tối ưu thực nghiệm. Những giá trị khởi đầu của bộ điều chỉnh giá bit cần được kiểm tra trong pilot; không trình bày là suy ra tối ưu từ2 clip.
+
+1. MỤC TIÊU, PHÂN CÔNG VÀ GIAO THỨC
+
+Mục tiêu chính: tăng chất lượng task khi đáp ứng ngân sách bit của clip. Không thưởng cho action khác0. Không ép ROI luôn giảm QP hoặc nền luôn tăng QP. Không bắt map có trung bình delta0: điều đó không bảo đảm giữ bitrate.
+
+Encoder giữ nguyên: QPA activity mapping, RC, smoothing/noise limits, native RDO/quantization, các bộ lọc, cấu trúc GOP và điểm áp dụng delta đã kiểm chứng. RL chọn phần bù theo task và tình trạng ngân sách. Lambda đổi tương ứng với QP; không phải action riêng.
+
+Profile nghiên cứu khởi đầu: official VVenC1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f; medium;480×320;30fps;QPA1;passes1;GOP32;CRA32;LookAhead1;MaxCuDQPSubdiv2;MaxParallelFrames0;2 encoder threads. Đối chứng native cùng profile/binary. Không thay baseline lịch sử bằng số liệu mới rồi vẫn gọi là cùng anchor.
+
+Pilot dữ liệu: train mini16/val4 đã khóa; không dùng Test để chọn state/reward/checkpoint. Train rates50,80,120,160,200kbps; validation tối thiểu50,120,200kbps theo cùng giao thức.256frame/clip là cấu hình pilot dự kiến; window/start và source pixel SHA phải vào manifest. Một clip là một lần khởi tạo codec/RC mới, không nối bit-budget của video trước sang video sau.
+
+2. TRỤC THỜI GIAN VÀ MÔI TRƯỜNG RL THẬT
+
+Chỉ số k là bước theo thứ tự mã hóa; p_k là POC của picture đang mã hóa. Với GOP phân cấp, không mặc định p_k=k. Mỗi step chọn TOÀN BỘ map delta của một picture, không step theo từng CTU trong cùng picture. Episode gồm T picture của cửa sổ đã khóa.
+
+Chuỗi bắt buộc:
+1) Encoder tiến tới picture p_k, tính xong thông tin RC/QPA hiện có, trước RDO chịu action.
+2) Xuất observation k,POC,episode_id và native QPA map. Actor đọc state rồi sample12 category.
+3) Nạp map nguyên của chính picture p_k. Map bất biến suốt quá trình RDO/thử partition của picture đó; không hỏi Actor lại ở mỗi CU candidate.
+4) Native QG áp delta theo vị trí và đồng bộ lambda. Preanalysis luôn không có RL.
+5) Picture hoàn tất reconstruction sau các bộ lọc; thu bit của AU và detection để tính reward. Gắn reward về đúng episode_id,k,POC.
+6) Để native RC tự cập nhật đúng vòng đời encoder, rồi tạo observation bước tiếp theo từ trajectory đang chịu action. Wrapper không cập nhật RC thêm lần hai. Không mặc định một lần gọi API tương ứng một frame; event queue phải ghép đúng episode/k/POC và tránh chờ outcome chưa thể phát khi đang giữ khóa encoder.
+
+Nếu output decoder được reorder, phải ghép theo POC; không gán reward theo thứ tự frame đọc ra. Trong training có thể dùng reconstruction native đã được kiểm parity để tránh chờ toàn bộ luồng decoder; VVdeC vẫn là gate độc lập cuối clip. Không đưa detection sau giải mã của picture hiện tại vào state trước khi encode nó.
+
+Hiện diagnostic chỉ đọc map cố định từ file, CHƯA PHẢI giao thức online ở trên. Khi triển khai cần thêm observation/request/response per picture và outcome, giữ nguyên hàm áp QP ổn định. Không được dùng toàn bộ QP/RC state của anchor để giả lập state của policy. Chỉ source pixels, source detections và QPA đối chứng reward có thể cache theo khóa hợp lệ.
+
+3. STATE: X_k∈R^(8×3×4), g_k∈R^15
+
+CTU128 tạo3 hàng×4 cột. Mép phải96pixel, hàng cuối64pixel; feature phải tính trên diện tích hợp lệ. Không resize thành20×30 rồi nói có600 quyết định độc lập. Kiến trúc có thể dùng grid khác ở nghiên cứu sau, nhưng đổi CTU/space là run/schema/anchor mới, không resume checkpoint như thể cùng action space.
+
+3.1 Tám kênh không gian
+
+X1 — task occupancy:
+Diện tích hợp của các bbox car nguồn giao với CTU / diện tích CTU hợp lệ. Khoảng[0,1]. Dùng union để không đếm trùng bbox chồng nhau. Đây là feature mềm, không phải quy tắc cứng chọn delta.
+
+X2 — task confidence map:
+Trong mỗi CTU, lấy trung bình trên pixel của confidence lớn nhất của các bbox car phủ pixel đó; ngoài bbox=0. Khoảng[0,1]. Confidence là độ tin cậy detector, không phải xác suất đúng được hiệu chuẩn hay annotation thật.
+
+X3 — object scale cue:
+max_j [confidence_j × (1-sqrt(area_bbox_j/(480×320)))] trên các bbox giao CTU; không có bbox thì0. Khoảng[0,1]. Chỉ là proxy giúp phân biệt quy mô; không mặc định xe nhỏ luôn phải nhận thêm bit hoặc confidence thấp chắc chắn do compression.
+
+X4 — native CTU QPA map:
+pic->ctuAdaptedQP sau bước QPA/RC của picture, chia63; giữ giá trị QP âm hợp lệ nếu có, không clip về0 chỉ để làm feature. Đây là map QPA ở cấp CTU tại thời điểm quan sát, KHÔNG được gọi là QP cuối mọi QG/CU.
+
+X5 — activity:
+Lấy activity nguồn mà QPA đã tính, giữ snapshot trước khi vùng lưu trữ tạm bị dùng lại cho lambda. f=clip(log((activity_i+eps)/(median_activity+eps)),-4,4)/4. Nếu không xuất được trường đúng thì phải báo không có; không lấy ctuQpaLambda sau cùng rồi đổi tên thành activity. eps và định nghĩa activity được version hóa.
+
+X6 — source temporal difference:
+Mean absolute difference Y nguồn giữa POC p và p-1 trên CTU, chia219 cho8-bit TV-range. Picture đầu cửa sổ:0. Chỉ dùng source frame đã có trong buffer phù hợp với lookahead đã công bố; không dùng reconstructed future frames hay ảnh nguồn ngoài window để lén tăng lookahead.
+
+X7 — previous requested delta map:
+Map action của picture được mã hóa ngay trước, chia2. Không gọi đây là action của POC p-1. History valid=0 khi chưa có; g_k có khoảng cách POC để mạng phân biệt. Không dùng candidate QG-call histogram làm map effective cuối.
+
+X8 — valid pixel area:
+Diện tích CTU hợp lệ /128². Cho Actor/Critic biết vùng mép không có cùng diện tích/chi phí như CTU đầy đủ. Có thể dùng làm trọng số pooling, không sửa joint log-probability theo diện tích.
+
+Thông tin task lấy từ YOLOv5n nguồn đã khóa, FP32, car class2, cùng chuyển đổi BT.709 và threshold/NMS/weights SHA như diagnostic. Source detections có thể cache độc lập action. Inference vẫn cần chạy detector nguồn hoặc một module thay thế đã được đánh giá; không tuyên bố nhẹ như paper gốc hoặc không cần task model. So heuristic cùng thông tin và ghi ms/frame của detector/Actor/encoder.
+
+3.2 Mười lăm feature toàn cục
+
+g1 log(B_bps/120000), B là target hiện tại.
+g2 k/T, tiến độ mã hóa trước quyết định.
+g3 p_k/max(T-1,1), vị trí trình chiếu chuẩn hóa, cùng local POC của cửa sổ.
+g4 U_k/C, bit thực tế đã xuất trong clip / budget clip.
+g5 clip(((C-U_k)/max(T-k,1))/(C/T),-4,4)/4, lượng bit còn lại bình quân mỗi picture so mức danh nghĩa. Đây là feature, không ép chia đều bit cho I/B pictures.
+g6 native sliceQP/63 trước action.
+g7 temporal-layer/giá trị chuẩn hóa cố định được ghi manifest.
+g8 reference-picture flag có sẵn từ GOP/slice metadata.
+g9–g11 one-hot I/P/B.
+g12 log1p(bits_AU_previous/(C/T)), clip theo ngưỡng cố định được ghi manifest; picture đầu0.
+g13 (p_k-p_previous_coded)/T; picture đầu0.
+g14 history_valid∈{0,1}.
+g15 giá bit lambda_rate đang dùng, chuẩn hóa theo upper bound của cấu hình.
+
+C=B_bps*T/30; U_k chỉ gồm byte đã hạch toán trước action hiện tại. Không dùng actual bitrate CU/frame chưa encode làm input. Không đưa baseline full-clip bitrate hoặc decoded task score chưa có vào state. Không đưa video ID/split ID để mạng ghi nhớ clip.
+
+g5,g12 và temporal-layer normalization là các phép chuẩn hóa, không phải tham số tối ưu task. Giá trị được chốt trong schema/config trước khi thu rollout, log saturation. Không cập nhật normalization một cách làm old/new policy nhìn khác nhau trong cùng PPO update; V1 ưu tiên chuẩn hóa vật lý cố định.
+
+4. ACTION VÀ PHÉP ÁP DỤNG
+
+a_k=(a_k,1,...,a_k,12), a_k,i∈{0,1,2,3,4}; lookup cố định D=(-2,-1,0,+1,+2).
+Actor output5logits mỗi CTU. Shared feature extractor và shared output weights giữa các vị trí; vẫn là một policy cho toàn frame. Stochastic training, argmax từng CTU khi deterministic evaluation.
+
+Không ép dấu theo ROI: Agent được chọn tăng/giảm/giữ ở mọi CTU. ROI features không biến Actor thành rule cứng. Cho phép global-like action nếu nó thực sự tốt; chỉ không được gọi đó là bằng chứng học phân bổ không gian. No-op là category2 ở mọi CTU.
+
+Map12 giá trị nguyên gắn với tọa độ nguồn480×320. QG nằm trong CTU thừa hưởng delta đó qua đường mapping đã kiểm chứng. Giữ nguyên native clipping theo bit-depth, MAX_QP và maxDeltaQP. Tại native hook:
+delta_eff=QP_applied-QP_native_at_that_QG
+lambda_applied=lambda_native*2^(delta_eff/3)
+
+State X4 có thể khác native QP ngay trước một QG cụ thể do sub-CTU QPA/candidate geometry. Vì vậy không được cam kết mọi request đều có eff=request ở mọi tình huống chỉ từ X4. Trace phải ghi yêu cầu, QP trước/sau, clipping và QG geometry. Các yêu cầu V1 đều là delta hợp lệ; encoder guard chịu trách nhiệm legal QP. Clipping nhiều-to-one không làm sai policy gradient nếu buffer/logprob vẫn giữ action category ban đầu, nhưng có thể làm yếu tín hiệu học và phải được phát hiện.
+
+V1 không thêm action masking dựa trên một bản đồ QP dự đoán chưa chắc đúng tại mọi QG. Nếu bổ sung mask sau này, chỉ dựa trên thông tin chắc chắn trước action, bảo đảm còn no-op, lưu đúng mask của rollout và dùng lại mask khi tính new logprob. Không mask “ROI không được tăng QP”, không sửa category sau sampling rồi tính logprob như action mới.
+
+Policy khởi tạo ưu tiên nhẹ no-op cho deterministic policy nhưng còn entropy để khám phá tất cả bins; không ép chọn delta khác0. Mức bias/logit/std không dùng như bằng chứng học. Không khởi tạo các logits bằng nhau rồi vô tình argmax tie luôn chọn bin-2 mà gọi đó là policy đã học.
+
+5. TASK SCORE: ĐỊNH NGHĨA MỚI ĐƯỢC VERSION HÓA
+
+V1 tiếp tục đo giữ lại detection nguồn, không tự gọi là ground-truth accuracy. Mỗi source frame p có boxes D_source(p); reconstructed frame có D_rec(p). Dùng confidence-ordered one-to-one IoU>=0.5, cùng class/threshold/NMS đã khóa.
+
+q_p=2TP/(2TP+FP+FN) nếu mẫu số>0.
+Nếu source và reconstructed đều không có detection, q_p=1.
+Nếu source không có detection nhưng reconstructed có, q_p=0.
+
+Quy ước empty-empty=1 là thay đổi có chủ đích so diagnostic cũ dùng0; tránh để frame nguồn không có đối tượng có reward y hệt khi phát sinh unmatched predictions. Hai clip đã phân tích không có frame source-empty nên kết luận kiểm chứng không thay đổi. Số liệu cũ giữ nguyên, không ghi đè hoặc gọi cùng metric version. Log song song legacy mean-frame F1 và task_retention_f1_v2; cache q0 phải được tính lại từ counts theo đúng version.
+
+Quality clip Q=(1/T)*sum_p q_p. Log thêm micro-F1, precision, recall, counts và negative-frame behavior. Đánh giá nghiên cứu cuối dùng annotation hợp lệ để tính mAP50 và mAP50:95; không lấy teacher-fidelity F1 thay cho mAP thật.
+
+6. REWARD VÀ NGÂN SÁCH
+
+6.1 Anchor cache
+
+Một no-op anchor mới cho đúng video/window/rate/profile/codec/color pipeline/source SHA. Cache frame q0_p và bit b0_p của access unit tương ứng. Cache chỉ là đối chứng reward/validation, không cung cấp trajectory QP/RC giả cho Actor. Đây không phải phản thực nhân quả riêng từng CTU: histories của Agent và anchor có thể khác nhau.
+
+Cache key tối thiểu: video MOV SHA + preprocessed YUV SHA + start frame/T + target + codec binary SHA + flags + detector source/weights SHA + color protocol + task metric version. Không reuse anchor CTU128 cho CTU64 hoặc clip64frame cho clip256frame. Actor không quan sát kết quả encode no-op của tương lai.
+
+6.2 Dense reward đề xuất
+
+r_raw_k=(q_(p_k)-q0_(p_k))/T - lambda_rate*(b_k-b0_(p_k))/C
+r_train_k=S*r_raw_k, S cố định cho cả run.
+
+b_k là bit thực tế của AU đã xuất, không phải estimated bits từ RC hoặc bytes decoded video. Mọi NAL/header/start-code phải được hạch toán, không đếm đôi. Metadata/trailing bytes không gắn được picture phải được cộng vào bước cuối trước khi trả terminal reward. Tổng b_k phải bằng8*actual stream size; nếu không, rollout không đạt gate reward accounting. Với coding order, lookup b0 theo đúng POC, không đọc theo thứ tự decoder output.
+
+Ở finite episode gamma=1:
+sum_k r_raw_k=(Q_agent-Q_anchor)-lambda_rate*(Bits_agent-Bits_anchor)/C.
+
+Do đó reward không phạt lặp lại sai lệch bitrate tích lũy ở mọi frame. Nó định giá chi phí bit phát sinh trên toàn clip. Reference subtraction hỗ trợ diễn giải/variance, không tự tạo credit assignment theo CTU hoặc bảo đảm không tăng bit.
+
+V1 đề xuất gamma=1 vì cửa sổ hữu hạn và để giữ đúng đẳng thức mục tiêu clip. GAE-lambda là tham số riêng (điểm khởi đầu0.95), không nhầm với lambda_rate. Rollout chunk chưa hết clip phải bootstrap đúng; không gán terminal chỉ vì hết batch. Clip hoàn tất mới là terminal thật.
+
+S=100 là điểm khởi đầu để tránh giá trị Critic quá nhỏ; đây là uniform scaling, không đổi tỷ lệ task/bit. Log cả raw/train. Advantage normalization không phải lý do bỏ kiểm tra scale của value/aux losses.
+
+6.3 Giá bit có điều chỉnh theo budget
+
+Không có dữ liệu để gọi beta0.1 tối ưu. Chọn lambda_rate là giá một phần ngân sách đổi lấy chất lượng task. Ví dụ lambda_rate=1: tăng1% target-bit bị trừ0.01quality, tương đương1điểm F1. Đây là cách đọc đơn vị, không phải bảo đảm đạt budget.
+
+Đề xuất bộ điều chỉnh ngoài PPO (PPO-Clip không đổi): giữ lambda cố định trong toàn bộ collection/update và clip. Sau update, chỉ dùng các clip TRAIN hoàn tất:
+lambda_next=clip(lambda_current+eta*mean_m(Bits_m/C_m-1),0,lambda_max).
+
+Tách giá theo target-rate bucket để tiết kiệm ở rate này không che overshoot ở rate khác. Giá mới chỉ dùng cho collection kế tiếp, sau boundary các clip; không thay reward đã lưu trong rollout. g15 cho policy/critic biết giá hiện hành. Không update giá trên validation/test. Lưu giá và trạng thái controller trong checkpoint/resume.
+
+Điểm khởi đầu để kiểm tra ở pilot: lambda_initial=1, eta=0.05, lambda_max=10; S100. Các giá trị này là tham số thử nghiệm, chưa tối ưu thực nghiệm. Trước training dài phải kiểm xem controller bão hòa/dao động hoặc không sửa được overshoot. Đây là một heuristic dual update cho ràng buộc kỳ vọng, không phải thuật toán CPO và không có bảo đảm cứng cho từng clip.
+
+Budget C dựa target danh nghĩa; không âm thầm dùng bitrate toàn-clip của QPA làm budget được Actor biết trước khi inference. QPA có thể undershoot target. Vì vậy tăng task khi dùng phần headroom vẫn phải được báo theo actual bitrate; không nhận là lợi ích spatial ở cùng bit nếu thực tế tăng bit.
+
+Validation yêu cầu kiểm budget từng clip và actual-rate matched comparison/đường cong; ngưỡng2% của nghiên cứu được công bố trước, không nới để làm đẹp kết quả. PPO/reward không bảo đảm cứng budget. Clip/method vượt ngưỡng thì đánh dấu không đạt điều kiện, không chọn checkpoint vì task gain do tăng bit.
+
+6.4 Những thành phần không đưa vào reward chính V1
+
+- Không thưởng action khác0 hoặc entropy thấp
+- Không ép zero-mean delta như đại diện cho bitrate
+- Không thêm phạt mọi thay đổi action mặc định: temporal fixed tests đã xử lý jitter ngoại sinh; chưa chứng minh mức phạt nào có lợi. Theo dõi temporal behavior trước, ablation nếu có vấn đề
+- PSNR/quality được log; chưa dùng PSNR làm mục tiêu chính để tránh vô tình quay lại tối ưu thị giác người. Nếu cần quality floor, phải định nghĩa và kiểm chứng riêng
+- Không đổi task sang confidence proxy chỉ để làm reward dễ tăng. Không coi F1teacher là mAP thật
+
+6.5 Kiểm tra độ nhạy trên số liệu hiện có, không thu thêm rollout
+
+Dùng các điểm đã chọn trong FIXED_SUMMARY, giá bit thử0/0.1/0.5/1/2 trong clip-score tương đương ở6.2: video A đều ưu tiên ROI-protect trong các phương án đã đo; video B ưu tiên uniform-2 khi giá<=1, chuyển sang no-op khi giá2. Điểm hòa uniform/no-op ở B xấp xỉ1.1812 theo đơn vị reward đã định nghĩa. Đây chỉ minh họa rằng trọng số quyết định đánh đổi; không chọn giá2 chỉ để ép hành vi no-op hoặc suy ra tối ưu tổng quát. Giá bit tự điều chỉnh theo actual budget còn phải kiểm chứng trong pilot. Các clip này không có source-empty frames, nên task score v2 và legacy giống nhau trong kiểm tra này.
+
+7. ACTOR/CRITIC/AUXILIARY VÀ CREDIT ASSIGNMENT
+
+Nhánh CNN trên X, MLP trên g, ghép/broadcast global features. Actor shared spatial output5 logits/CTU; Critic pool không gian có xét diện tích hợp lệ rồi nhận g để dự đoán scalar V của shaped return. Kiến trúc chi tiết số kênh là implementation configuration cần ghi, không coi có mạng lớn là tối ưu.
+
+pi(a|s)=product_i pi_i(a_i|s); logpi=sum_i logpi_i. PPO ratio=exp(logpi_new-logpi_old). Không lấy mean logprob để rồi gọi là joint probability. Entropy có thể dùng mean/CTU làm regularizer nếu công bố rõ; log cả joint và per-CTU. KL/clip fraction phải ghi đúng đơn vị khi đặt early-stop. Phân phối phân rã không tự biểu diễn mọi tương quan joint giữa CTU; shared features/global budget giúp điều kiện hóa nhưng chưa giải quyết hoàn toàn phối hợp.
+
+Actor nhận return toàn frame/clip, nên credit assignment theo CTU vẫn là khó khăn thực sự. Không được chia cùng reward cho từng vùng rồi nói đã biết reward riêng của mỗi CTU. Log đóng góp qua các ablation/đối chứng có kiểm soát.
+
+Giữ auxiliary head, nhưng target phải liên quan task, không chỉ học tái tạo bản đồ QPA. Đề xuất auxiliary action-conditioned: từ spatial features + category map đã sample, dự đoán tỷ lệ source objects được giữ lại theo vùng. Gán source objects theo tâm vào CTU; matched/unmatched theo matching toàn frame. Empty-object cells không gán0 như “task kém”, dùng mask supervision. Loss không phải local causal advantage. Trọng số được ghi và có ablation aux=0; không khẳng định head này là nguyên nhân thất bại hoặc giải pháp chắc chắn.
+
+8. CÁC TRƯỜNG CẦN XÁC NHẬN KHI TRIỂN KHAI, TRƯỚC ROLLOUT HỌC
+
+- Hook observation sau native QPA picture map và trước action-affected RDO
+- Lưu activity đúng thời điểm trước khi buffer chuyển sang chứa lambda
+- Coding step/POC/coding order, episode/window và loại frame
+- Live cumulative actual AU bits, current sliceQP/CTU QPA map và history; không copy từ anchor
+- AU byte accounting khớp file, cả header/trailer
+- Pause/response per picture, không re-sample ở mỗi CU candidate
+- Native reconstruction đầy đủ sau filter; reward/detection gắn đúng POC
+- Existing RDO hook không thay đổi ngữ nghĩa no-op, preanalysis không có RL
+
+Nếu thiếu một trường, dừng ở gate quan sát/đếm bit thay vì bịa field từ post-encode tương lai. Những giao diện online trên chưa có bằng chứng từ notebook map cố định, cần được xác nhận ở implementation preflight; đây không phải yêu cầu chạy thêm một loạt fixed-map dataset trials trước khi được thiết kế.
+
+9. GATE VÀ ABLATION CÓ TRỌNG TÂM
+
+Gate trước học: same-profile no-op bit equality; all5 delta bins legal/effective native test; mapping mép ảnh/QG; lambda; encode/decode; observation replay same-state same-logprob/value; requested category buffer roundtrip; AU accounting; reward-sum identity; coding/POC matching; no information leakage; source/anchor/task version locks.
+
+Short learning: Actor parameter change chưa đủ. Theo dõi sampled vs argmax distribution mỗi CTU, entropy, joint/per-CTU KL, effective action/clipping, QP cuối/candidate/quant phân biệt, component reward, clip actual bits, quality. Cho phép no-op học được; không ép phân bố nhiều bins để đẹp log.
+
+Đối chứng bắt buộc: QPA/no-op, uniform-2, heuristic ROI-protect/redistribute, random legal policy, trained PPO. Thông tin source detector và compute budget phải công bố; heuristic cũng có cùng semantic input. Main ablation nhỏ: bỏ semantic channels nhưng giữ cùng algorithm/action/reward; aux off vs on. Không đổi đồng thời codec, CTU, reward và optimizer rồi quy công cho thuật toán.
+
+Validation phải giữ lại cả trường hợp ROI có lợi và có hại, theo rate/video, không chỉ macro-mean che video B. Có thể tăng clip length/coverage trong pilot val4; Test để đánh giá cuối khi đã khóa phương pháp. Các chỉ số cuối là actual RD/task curves và annotated mAP, BD metrics chỉ khi đủ điểm/vùng chồng lấn; undefined phải để null, không sửa số liệu.
+
+10. KHÁC VỚI PAPER VÀ ĐÓNG GÓP CẦN CHỨNG MINH
+
+RL-RC-DoT dùng block-level QP control, PPO và reward thông tin task/bit, auxiliary block prediction; paper thiết kế không cần downstream task input ở inference. V1 ở đây dùng semantic detector phía encoder và Multi-Categorical trên CTU VVC: đó là thay đổi phương pháp, có compute cost, không gọi là tái hiện y hệt. Semantic bit allocation cũng đã có trong tài liệu trước; chỉ thêm ROI không đủ xác nhận tính mới.
+
+Đóng góp nghiên cứu cần chứng minh bằng thực nghiệm: cơ chế học phần bù native QPA cho task dưới ngân sách, có lợi ích bổ sung so heuristic, có quyết định theo trạng thái chứ không global shortcut cố định. Tính mới cần một lượt literature review riêng trước tuyên bố cuối, không suy ra từ thành công kỹ thuật của patch.
+
+11. NGUỒN VÀ TRUY VẾT
+
+[1] Schulman et al., PPO,2017: https://arxiv.org/abs/1707.06347
+[2] Schulman et al., GAE: https://arxiv.org/abs/1506.02438
+[3] Gadot et al., RL-RC-DoT,CVPR2025: https://arxiv.org/html/2501.12216v2
+[4] Li, Shi, Chen, Task-driven Semantic Coding via RL: https://arxiv.org/abs/2106.03511
+[5] Achiam et al., Constrained Policy Optimization: https://arxiv.org/abs/1705.10528 (cơ sở phân biệt reward và constraint; V1 không triển khai CPO)
+[6] SB3 PPO action support: https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
+[7] VVenC QPA/RC overview: https://github.com/fraunhoferhhi/vvenc/wiki/Encoder-Performance
+[8] VVenC EncSlice: https://github.com/fraunhoferhhi/vvenc/blob/1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f/source/Lib/EncoderLib/EncSlice.cpp
+[9] VVenC BitAllocation: https://github.com/fraunhoferhhi/vvenc/blob/1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f/source/Lib/EncoderLib/BitAllocation.cpp
+[10] VVenC EncGOP: https://github.com/fraunhoferhhi/vvenc/blob/1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f/source/Lib/EncoderLib/EncGOP.cpp
+
+Nguồn thực nghiệm: D:\VCM\QPA_FIXED_RESULTS_KAGGLE_SAFE.zip và hai gói diagnostic/controls trước.
+Phân tích độc lập: C:\Users\Thanh An\Downloads\QPA_FIXED_ANALYSIS_20261120\INDEPENDENT_FIXED_ANALYSIS.json
+Pin codec và dataset giữ như nghiên cứu đã kiểm chứng. Các kết quả cũ/chạy training cũ là đối chứng lịch sử, không checkpoint resume cho kiến trúc/state/action/reward V1 mới.

@@ -1,0 +1,36 @@
+{
+  "commit": "1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f",
+  "before": {
+    "source/Lib/EncoderLib/BitAllocation.cpp": "0e871d2f4a791434a25c174e4d00727449c1df44f1f9b3bec82e32fd57e31229",
+    "source/Lib/EncoderLib/EncCu.cpp": "1db1b4e6ca01daffd1440e5026879654fafc4b9408f7cd4e5f341dae22a1ae8e",
+    "source/Lib/EncoderLib/EncPicture.cpp": "5ef817bd3c00bc1ffddf0dacbf305e56c2e8dbffa0d7686183f6aca0d41f0c4d",
+    "source/Lib/CommonLib/Quant.cpp": "dd05da7954dba375f0cc8438f11b26601ff93619cdbf3483ebdb6317fe92f765",
+    "source/Lib/EncoderLib/EncSlice.cpp": "57b0196d33ed12d123b6b023248d2f28b662aa338b5e4378108dca081218298b",
+    "source/Lib/EncoderLib/EncGOP.cpp": "a0dd9d742058e9d1fb071aa2c460e5a44fc148e1c8ed9c618533d04dc71ee8cf"
+  },
+  "after": {
+    "source/Lib/EncoderLib/BitAllocation.cpp": "2662c322d054d1eaa8334bc41f23130e15bc63420baa2564c1a10e40c10891b7",
+    "source/Lib/EncoderLib/EncCu.cpp": "558611f2a309347aa0199a49052aa2412e835c335f78cbc98755438fc19fb342",
+    "source/Lib/EncoderLib/EncPicture.cpp": "c96c08bc3e68e1ac4aeb26d5174d9f5143a4a50156f540bdbb3e5fb986fd9290",
+    "source/Lib/CommonLib/Quant.cpp": "c8a62a7caba0d11e68512244b0618fb11e011ca85ad9dc4c0091734518c9d14b",
+    "source/Lib/EncoderLib/EncSlice.cpp": "0df24727dad3c242e2436d6cf42e6a620368aabb996ced14ce7ead930864e1a2",
+    "source/Lib/EncoderLib/EncGOP.cpp": "4147dd647edd9e7a237c9fe1d05bb59e18ffd92c70cd20b8fa3cd2d5290d45c2",
+    "source/Lib/EncoderLib/QpaProbe.h": "8439ae8ae2012adcaa18e46e4d0c44fb7352146e78ebdb9527318286b49e31e5",
+    "source/Lib/EncoderLib/VvcRlSession.h": "05eb2b60c0336ccee435b560c6719a613eec9c3a8258a793bc3d6616e3148379"
+  },
+  "header_sha256": "6c980a4ec15cd6b492aed357ad18d059af081d0052a5ae83b6ed7ba27952a2ac",
+  "stages": [
+    "activity",
+    "activity_qp",
+    "before_smoothing",
+    "after_smoothing",
+    "rc_shift",
+    "noise_limit",
+    "qpa_final",
+    "subctu_qpa",
+    "qg_action",
+    "winning_cu",
+    "quant_unique_candidate"
+  ],
+  "schema": "vvc-rl-online-patch/1"
+}

@@ -1,0 +1,14 @@
+# PyTorch >=2.5 is required. Preserve the CUDA build provided by Kaggle.
+numpy>=1.26,<3
+torch>=2.5,<3
+setuptools==80.9.0
+gitpython==3.1.45
+requests
+PyYAML
+pandas
+seaborn
+scipy
+pillow
+tqdm
+psutil
+opencv-python-headless

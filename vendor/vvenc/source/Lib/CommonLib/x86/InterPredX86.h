@@ -1,0 +1,1557 @@
+/* -----------------------------------------------------------------------------
+The copyright in this software is being made available under the Clear BSD
+License, included below. No patent rights, trademark rights and/or 
+other Intellectual Property Rights other than the copyrights concerning 
+the Software are granted under this license.
+
+The Clear BSD License
+
+Copyright (c) 2019-2026, Fraunhofer-Gesellschaft zur Förderung der angewandten Forschung e.V. & The VVenC Authors.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted (subject to the limitations in the disclaimer below) provided that
+the following conditions are met:
+
+     * Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+     * Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+
+     * Neither the name of the copyright holder nor the names of its
+     contributors may be used to endorse or promote products derived from this
+     software without specific prior written permission.
+
+NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE GRANTED BY
+THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+
+------------------------------------------------------------------------------------------- */
+/** \file     InterPredX86.h
+    \brief    SIMD for InterPrediction
+*/
+
+//! \ingroup CommonLib
+//! \{
+
+
+//#include "CommonLib/CommonDef.h"
+#include "CommonDefX86.h"
+#include "Rom.h"
+#include "InterPrediction.h"
+#include "InterpolationFilter4x4X86.h"
+
+#if defined(TARGET_SIMD_X86)  && ENABLE_SIMD_OPT_BDOF
+
+//! \ingroup CommonLib
+//! \{
+
+namespace vvenc {
+
+
+
+static inline int rightShiftMSB(int numer, int denom)
+{
+  int shiftIdx = bit_scan_reverse(denom);
+  return (numer >> shiftIdx);
+}
+  
+template<X86_VEXT vext>
+static ALWAYS_INLINE void addBIOAvg4_SSE(const int16_t* src0, const int16_t* src1, int16_t* dst, ptrdiff_t dstStride, const int16_t* gradX0, const int16_t* gradX1, const int16_t* gradY0, const int16_t* gradY1, ptrdiff_t widthG, int tmpx, int tmpy, int shift, int offset, const ClpRng& clpRng)
+{
+  const ptrdiff_t src0Stride = widthG + 2;
+  const ptrdiff_t src1Stride = widthG + 2;
+  const ptrdiff_t gradStride = widthG;
+
+  __m128i mm_tmpx    = _mm_set1_epi32( ( tmpx & 0xffff ) | ( tmpy << 16 ) );
+  __m128i mm_offset  = _mm_set1_epi32( offset );
+  __m128i vibdimin   = _mm_set1_epi16( clpRng.min() );
+  __m128i vibdimax   = _mm_set1_epi16( clpRng.max() );
+  __m128i mm_a;
+  __m128i mm_b;
+  __m128i mm_sum;
+
+  for( int y = 0; y < 4; y++, dst += dstStride, src0 += src0Stride, src1 += src1Stride, gradX0 += gradStride, gradX1 += gradStride, gradY0 += gradStride, gradY1 += gradStride )
+  {
+    mm_a   = _mm_unpacklo_epi16 ( _vv_loadl_epi64( (const __m128i *) gradX0 ), _vv_loadl_epi64( (const __m128i *) gradY0 ) );
+    mm_b   = _mm_unpacklo_epi16 ( _vv_loadl_epi64( (const __m128i *) gradX1 ), _vv_loadl_epi64( (const __m128i *) gradY1 ) );
+    mm_a   = _mm_sub_epi16      ( mm_a, mm_b );
+    mm_sum = _mm_madd_epi16     ( mm_a, mm_tmpx );
+    mm_a   = _mm_cvtepi16_epi32 ( _vv_loadl_epi64( (const __m128i *) ( src0 ) ) );
+    mm_b   = _mm_cvtepi16_epi32 ( _vv_loadl_epi64( (const __m128i *) ( src1 ) ) );
+    mm_sum = _mm_add_epi32      ( _mm_add_epi32( mm_sum, mm_a ), _mm_add_epi32( mm_b, mm_offset ) );
+    mm_sum = _mm_packs_epi32    ( _mm_srai_epi32( mm_sum, shift ), mm_a );
+    mm_sum = _mm_min_epi16      ( vibdimax, _mm_max_epi16( vibdimin, mm_sum ) );
+    _vv_storel_epi64            ( (__m128i *) dst, mm_sum );
+  }
+}
+
+#if USE_AVX2
+static ALWAYS_INLINE void addBIOAvg4_2x_AVX2(const int16_t* src0, const int16_t* src1, int16_t* dst, ptrdiff_t dstStride, const int16_t* gradX0, const int16_t* gradX1, const int16_t* gradY0, const int16_t* gradY1, ptrdiff_t widthG, int tmpx0, int tmpx1, int tmpy0, int tmpy1, int shift, int offset, const ClpRng& clpRng)
+{
+  const ptrdiff_t src0Stride = widthG + 2;
+  const ptrdiff_t src1Stride = widthG + 2;
+  const ptrdiff_t gradStride = widthG;
+
+  __m256i mm_tmpx    = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_set1_epi32( ( tmpx0 & 0xffff ) | ( tmpy0 * ( 1 << 16 )) ) ), _mm_set1_epi32( ( tmpx1 & 0xffff ) | ( tmpy1 * ( 1 << 16 )) ), 1 );
+  __m256i mm_offset  = _mm256_set1_epi32( offset );
+  __m256i vibdimin   = _mm256_set1_epi32( clpRng.min() );
+  __m256i vibdimax   = _mm256_set1_epi32( clpRng.max() );
+  __m256i mm_a;
+  __m256i mm_b;
+  __m256i mm_sum;
+  __m128i xsrc0, xsrc1;
+
+  for( int y = 0; y < 4; y++, dst += dstStride, src0 += src0Stride, src1 += src1Stride, gradX0 += gradStride, gradX1 += gradStride, gradY0 += gradStride, gradY1 += gradStride )
+  {
+    xsrc0  = _mm_loadu_si128       ( ( const __m128i * ) gradX0 );
+    xsrc1  = _mm_loadu_si128       ( ( const __m128i * ) gradY0 );
+    mm_a   = _mm256_castsi128_si256( _mm_unpacklo_epi16( xsrc0, xsrc1 ) );
+    mm_a   = _mm256_inserti128_si256( mm_a, _mm_unpackhi_epi16( xsrc0, xsrc1 ), 1 );
+    xsrc0  = _mm_loadu_si128       ( ( const __m128i * ) gradX1 );
+    xsrc1  = _mm_loadu_si128       ( ( const __m128i * ) gradY1 );
+    mm_b   = _mm256_castsi128_si256( _mm_unpacklo_epi16( xsrc0, xsrc1 ) );
+    mm_b   = _mm256_inserti128_si256( mm_b, _mm_unpackhi_epi16( xsrc0, xsrc1 ), 1 );
+    mm_a   = _mm256_sub_epi16      ( mm_a, mm_b );
+    mm_sum = _mm256_madd_epi16     ( mm_a, mm_tmpx );
+    mm_a   = _mm256_cvtepi16_epi32 ( _mm_loadu_si128( (const __m128i *) ( src0 ) ) );
+    mm_b   = _mm256_cvtepi16_epi32 ( _mm_loadu_si128( (const __m128i *) ( src1 ) ) );
+    mm_sum = _mm256_add_epi32      ( _mm256_add_epi32( mm_sum, mm_a ), _mm256_add_epi32( mm_b, mm_offset ) );
+    mm_sum = _mm256_srai_epi32     ( mm_sum, shift );
+    mm_sum = _mm256_min_epi32      ( vibdimax, _mm256_max_epi32( vibdimin, mm_sum ) );
+    _mm_storeu_si128               ( (__m128i *) dst, _mm256_cvtepi32_epi16x( mm_sum ) );
+  }
+}
+#endif
+
+template< X86_VEXT vext >
+static inline void calcBIOSums_SSE(const Pel* srcY0Tmp, const Pel* srcY1Tmp, const Pel* gradX0, const Pel* gradX1, const Pel* gradY0, const Pel* gradY1, const int widthG, const int bitDepth, int limit, int &tmpx, int &tmpy)
+{
+  static constexpr int shift4 = 4;
+  static constexpr int shift5 = 1;
+  const int srcStride = widthG + 2;
+
+  __m128i sumAbsGXTmp    = _mm_setzero_si128();
+  __m128i sumDIXTmp      = _mm_setzero_si128();
+  __m128i sumAbsGYTmp    = _mm_setzero_si128();
+  __m128i sumDIYTmp      = _mm_setzero_si128();
+  __m128i sumSignGyGxTmp = _mm_setzero_si128();
+
+  for (int y = 0; y < 6; y++)
+  {
+    __m128i shiftSrcY0Tmp = _mm_srai_epi16(_mm_loadu_si128((__m128i*)(srcY0Tmp)), shift4);
+    __m128i shiftSrcY1Tmp = _mm_srai_epi16(_mm_loadu_si128((__m128i*)(srcY1Tmp)), shift4);
+    __m128i loadGradX0    = _mm_loadu_si128((__m128i*)(gradX0));
+    __m128i loadGradX1    = _mm_loadu_si128((__m128i*)(gradX1));
+    __m128i loadGradY0    = _mm_loadu_si128((__m128i*)(gradY0));
+    __m128i loadGradY1    = _mm_loadu_si128((__m128i*)(gradY1));
+    __m128i subTemp1      = _mm_sub_epi16(shiftSrcY1Tmp, shiftSrcY0Tmp);
+    __m128i packTempX     = _mm_srai_epi16(_mm_add_epi16(loadGradX0, loadGradX1), shift5);
+    __m128i packTempY     = _mm_srai_epi16(_mm_add_epi16(loadGradY0, loadGradY1), shift5);
+    __m128i gX            = _mm_abs_epi16(packTempX);
+    __m128i gY            = _mm_abs_epi16(packTempY);
+    __m128i dIX           = _mm_sign_epi16(subTemp1,  packTempX);
+    __m128i dIY           = _mm_sign_epi16(subTemp1,  packTempY);
+    __m128i signGY_GX     = _mm_sign_epi16(packTempX, packTempY);
+
+    sumAbsGXTmp     = _mm_add_epi16(sumAbsGXTmp, gX);
+    sumDIXTmp       = _mm_add_epi16(sumDIXTmp, dIX);
+    sumAbsGYTmp     = _mm_add_epi16(sumAbsGYTmp, gY);
+    sumDIYTmp       = _mm_add_epi16(sumDIYTmp, dIY);
+    sumSignGyGxTmp  = _mm_add_epi16(sumSignGyGxTmp, signGY_GX);
+
+    srcY0Tmp += srcStride;
+    srcY1Tmp += srcStride;
+    gradX0 += widthG;
+    gradX1 += widthG;
+    gradY0 += widthG;
+    gradY1 += widthG;
+  }
+
+  sumAbsGXTmp    = _mm_madd_epi16(sumAbsGXTmp,    _mm_setr_epi16(1, 1, 1, 1, 1, 1, 0, 0));
+  sumDIXTmp      = _mm_madd_epi16(sumDIXTmp,      _mm_setr_epi16(1, 1, 1, 1, 1, 1, 0, 0));
+  sumAbsGYTmp    = _mm_madd_epi16(sumAbsGYTmp,    _mm_setr_epi16(1, 1, 1, 1, 1, 1, 0, 0));
+  sumDIYTmp      = _mm_madd_epi16(sumDIYTmp,      _mm_setr_epi16(1, 1, 1, 1, 1, 1, 0, 0));
+  sumSignGyGxTmp = _mm_madd_epi16(sumSignGyGxTmp, _mm_setr_epi16(1, 1, 1, 1, 1, 1, 0, 0));
+
+  __m128i a12 = _mm_unpacklo_epi32(sumAbsGXTmp, sumAbsGYTmp);
+  __m128i a3  = _mm_unpackhi_epi32(sumAbsGXTmp, sumAbsGYTmp);
+  __m128i b12 = _mm_unpacklo_epi32(sumDIXTmp, sumDIYTmp);
+  __m128i b3  = _mm_unpackhi_epi32(sumDIXTmp, sumDIYTmp);
+  __m128i c1  = _mm_unpacklo_epi64(a12, b12);
+  __m128i c2  = _mm_unpackhi_epi64(a12, b12);
+  __m128i c3  = _mm_unpacklo_epi64(a3, b3);
+
+  c1 = _mm_add_epi32(c1, c2);
+  c1 = _mm_add_epi32(c1, c3);
+
+  int sumAbsGX = _mm_cvtsi128_si32(c1);
+  int sumAbsGY = _mm_cvtsi128_si32(_mm_shuffle_epi32(c1, 0x55));
+  int sumDIX   = _mm_cvtsi128_si32(_mm_shuffle_epi32(c1, 0xaa));
+  int sumDIY   = _mm_cvtsi128_si32(_mm_shuffle_epi32(c1, 0xff));
+
+  sumSignGyGxTmp = _mm_add_epi32(sumSignGyGxTmp, _mm_shuffle_epi32(sumSignGyGxTmp, 0x4e));   // 01001110
+  sumSignGyGxTmp = _mm_add_epi32(sumSignGyGxTmp, _mm_shuffle_epi32(sumSignGyGxTmp, 0xb1));   // 10110001
+  int sumSignGY_GX  = _mm_cvtsi128_si32(sumSignGyGxTmp);
+
+  tmpx = sumAbsGX == 0 ? 0 : rightShiftMSB( sumDIX << 2, sumAbsGX );
+  tmpx = Clip3( -limit, limit, tmpx );
+
+  int mainsGxGy = sumSignGY_GX >> 12;
+  int secsGxGy  = sumSignGY_GX & ( ( 1 << 12 ) - 1 );
+  int tmpData   = tmpx * mainsGxGy;
+  tmpData       = ( ( tmpData << 12 ) + tmpx * secsGxGy ) >> 1;
+  tmpy = sumAbsGY == 0 ? 0 : rightShiftMSB( ( ( sumDIY << 2 ) - tmpData ), sumAbsGY );
+  tmpy = Clip3( -limit, limit, tmpy );
+}
+
+#if USE_AVX2
+static inline void calcBIOSums2x_AVX2(const Pel* srcY0Tmp, const Pel* srcY1Tmp, const Pel* gradX0, const Pel* gradX1, const Pel* gradY0, const Pel* gradY1, const int widthG, const int bitDepth, int limit, int &tmpx0, int &tmpx1, int &tmpy0, int &tmpy1 )
+{
+  static constexpr int shift4 = 4;
+  static constexpr int shift5 = 1;
+  const int srcStride = widthG + 2;
+  
+  __m256i sumAbsGXTmp     = _mm256_setzero_si256();
+  __m256i sumDIXTmp       = _mm256_setzero_si256();
+  __m256i sumAbsGYTmp     = _mm256_setzero_si256();
+  __m256i sumDIYTmp       = _mm256_setzero_si256();
+  __m256i sumSignGyGxTmp  = _mm256_setzero_si256();
+
+#define _mm256_load2_si128_offset4(addr) _mm256_inserti128_si256( _mm256_castsi128_si256(_mm_loadu_si128((const __m128i*) &addr[0])), _mm_loadu_si128((const __m128i*) &addr[4]), 1 )
+
+  for (int y = 0; y < 6; y++)
+  {
+    __m256i shiftSrcY0Tmp = _mm256_srai_epi16(_mm256_load2_si128_offset4(srcY0Tmp), shift4);
+    __m256i shiftSrcY1Tmp = _mm256_srai_epi16(_mm256_load2_si128_offset4(srcY1Tmp), shift4);
+    __m256i loadGradX0    = _mm256_load2_si128_offset4(gradX0);
+    __m256i loadGradX1    = _mm256_load2_si128_offset4(gradX1);
+    __m256i loadGradY0    = _mm256_load2_si128_offset4(gradY0);
+    __m256i loadGradY1    = _mm256_load2_si128_offset4(gradY1);
+    __m256i subTemp1      = _mm256_sub_epi16(shiftSrcY1Tmp, shiftSrcY0Tmp);
+    __m256i packTempX     = _mm256_srai_epi16(_mm256_add_epi16(loadGradX0, loadGradX1), shift5);
+    __m256i packTempY     = _mm256_srai_epi16(_mm256_add_epi16(loadGradY0, loadGradY1), shift5);
+    __m256i gX            = _mm256_abs_epi16(packTempX);
+    __m256i gY            = _mm256_abs_epi16(packTempY);
+    __m256i dIX           = _mm256_sign_epi16(subTemp1,  packTempX );
+    __m256i dIY           = _mm256_sign_epi16(subTemp1,  packTempY );
+    __m256i signGY_GX     = _mm256_sign_epi16(packTempX, packTempY );
+
+    sumAbsGXTmp     = _mm256_add_epi16(sumAbsGXTmp, gX);
+    sumDIXTmp       = _mm256_add_epi16(sumDIXTmp, dIX);
+    sumAbsGYTmp     = _mm256_add_epi16(sumAbsGYTmp, gY);
+    sumDIYTmp       = _mm256_add_epi16(sumDIYTmp, dIY);
+    sumSignGyGxTmp  = _mm256_add_epi16(sumSignGyGxTmp, signGY_GX);
+
+    srcY0Tmp += srcStride;
+    srcY1Tmp += srcStride;
+    gradX0 += widthG;
+    gradX1 += widthG;
+    gradY0 += widthG;
+    gradY1 += widthG;
+  }
+
+#undef _mm256_load2_si128_offset4
+
+  sumAbsGXTmp    = _mm256_madd_epi16(sumAbsGXTmp,    _mm256_setr_epi16(1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0));
+  sumDIXTmp      = _mm256_madd_epi16(sumDIXTmp,      _mm256_setr_epi16(1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0));
+  sumAbsGYTmp    = _mm256_madd_epi16(sumAbsGYTmp,    _mm256_setr_epi16(1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0));
+  sumDIYTmp      = _mm256_madd_epi16(sumDIYTmp,      _mm256_setr_epi16(1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0));
+  sumSignGyGxTmp = _mm256_madd_epi16(sumSignGyGxTmp, _mm256_setr_epi16(1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0));
+
+  __m256i a12 = _mm256_unpacklo_epi32(sumAbsGXTmp, sumAbsGYTmp);
+  __m256i a3  = _mm256_unpackhi_epi32(sumAbsGXTmp, sumAbsGYTmp);
+  __m256i b12 = _mm256_unpacklo_epi32(sumDIXTmp, sumDIYTmp);
+  __m256i b3  = _mm256_unpackhi_epi32(sumDIXTmp, sumDIYTmp);
+  __m256i c1  = _mm256_unpacklo_epi64(a12, b12);
+  __m256i c2  = _mm256_unpackhi_epi64(a12, b12);
+  __m256i c3  = _mm256_unpacklo_epi64(a3, b3);
+
+  c1 = _mm256_add_epi32(c1, c2);
+  c1 = _mm256_add_epi32(c1, c3);
+
+  int tmpData[8];
+
+  _mm256_storeu_si256( ( __m256i* ) &tmpData[0], c1 );
+
+  #define sumAbsGX0 tmpData[0]
+  #define sumAbsGX1 tmpData[4]
+
+  #define sumAbsGY0 tmpData[1]
+  #define sumAbsGY1 tmpData[5]
+
+  #define sumDIX0   tmpData[2]
+  #define sumDIX1   tmpData[6]
+
+  #define sumDIY0   tmpData[3]
+  #define sumDIY1   tmpData[7]
+
+  sumSignGyGxTmp = _mm256_add_epi32(sumSignGyGxTmp, _mm256_shuffle_epi32(sumSignGyGxTmp, 0x4e));   // 01001110
+  sumSignGyGxTmp = _mm256_add_epi32(sumSignGyGxTmp, _mm256_shuffle_epi32(sumSignGyGxTmp, 0xb1));   // 10110001
+
+  int sumSignGY_GX0 = _mm256_extract_epi32( sumSignGyGxTmp, 0 );
+  int sumSignGY_GX1 = _mm256_extract_epi32( sumSignGyGxTmp, 4 );
+
+#if 0
+  tmpx0 = sumAbsGX0 == 0 ? 0 : Clip3( -limit, limit, rightShiftMSB( sumDIX0 << 2, sumAbsGX0 ) );
+  tmpx1 = sumAbsGX1 == 0 ? 0 : Clip3( -limit, limit, rightShiftMSB( sumDIX1 << 2, sumAbsGX1 ) );
+  __m128i vtmpx         = _mm_setr_epi32 ( tmpx0, tmpx1, 0, 0 );
+  __m128i vsumSignGY_GX = _mm_setr_epi32 ( sumSignGY_GX0, sumSignGY_GX1, 0, 0 );
+  __m128i vmainsGxGy    = _mm_srai_epi32 ( vsumSignGY_GX, 12 );
+  __m128i vsecsGxGy     = _mm_and_si128  ( vsumSignGY_GX, _mm_set1_epi32( ( 1 << 12 ) - 1 ) );
+  __m128i vtmpData      = _mm_mullo_epi32( vtmpx, vmainsGxGy );
+  vtmpData              = _mm_slli_epi32 ( vtmpData, 12 );
+  vtmpData              = _mm_add_epi32  ( vtmpData, _mm_mullo_epi32( vtmpx, vsecsGxGy ) );
+  vtmpData              = _mm_srai_epi32 ( vtmpData, 1 );
+  __m128i vtmpyIn       = _mm_slli_epi32 ( _mm_setr_epi32( sumDIY0, sumDIY1, 0, 0 ), 2 );
+  vtmpyIn               = _mm_sub_epi32  ( vtmpyIn, vtmpData );
+
+  tmpy0 = sumAbsGY0 == 0 ? 0 : Clip3( -limit, limit, rightShiftMSB( _mm_extract_epi32( vtmpyIn, 0 ), sumAbsGY0 ) );
+  tmpy1 = sumAbsGY1 == 0 ? 0 : Clip3( -limit, limit, rightShiftMSB( _mm_extract_epi32( vtmpyIn, 1 ), sumAbsGY1 ) );
+#else
+  tmpx0 = sumAbsGX0 == 0 ? 0 : rightShiftMSB( sumDIX0 *4, sumAbsGX0 );
+  tmpx0 = Clip3( -limit, limit, tmpx0 );
+
+  int mainsGxGy0 = sumSignGY_GX0 >> 12;
+  int secsGxGy0  = sumSignGY_GX0 & ( ( 1 << 12 ) - 1 );
+  int tmpData0   = tmpx0 * mainsGxGy0;
+  tmpData0       = ( ( tmpData0 * ( 1 << 12 )) + tmpx0 * secsGxGy0 ) >> 1;
+  tmpy0 = sumAbsGY0 == 0 ? 0 : rightShiftMSB( ( ( sumDIY0 *4) - tmpData0 ), sumAbsGY0 );
+  tmpy0 = Clip3( -limit, limit, tmpy0 );
+
+
+  tmpx1 = sumAbsGX1 == 0 ? 0 : rightShiftMSB( sumDIX1 *4, sumAbsGX1 );
+  tmpx1 = Clip3( -limit, limit, tmpx1 );
+
+  int mainsGxGy1 = sumSignGY_GX1 >> 12;
+  int secsGxGy1  = sumSignGY_GX1 & ( ( 1 << 12 ) - 1 );
+  int tmpData1   = tmpx1 * mainsGxGy1;
+  tmpData1 = ( ( tmpData1 * ( 1 << 12 )) + tmpx1 * secsGxGy1 ) >> 1;
+  tmpy1 = sumAbsGY1 == 0 ? 0 : rightShiftMSB( ( ( sumDIY1*4 ) - tmpData1 ), sumAbsGY1 );
+  tmpy1 = Clip3( -limit, limit, tmpy1 );
+#endif
+
+#undef sumAbsGX0
+#undef sumAbsGX1
+#undef sumAbsGY0
+#undef sumAbsGY1
+#undef sumDIX0  
+#undef sumDIX1  
+#undef sumDIY0  
+#undef sumDIY1  
+}
+#endif
+
+template<X86_VEXT vext, int bitDepth>
+static void BiOptFlowCoreSIMDBitDepth( const Pel* srcY0,
+                        const Pel* srcY1,
+                        const Pel* gradX0,
+                        const Pel* gradX1,
+                        const Pel* gradY0,
+                        const Pel* gradY1,
+                        const int  width,
+                        const int  height,
+                              Pel* dstY,
+                        const ptrdiff_t dstStride,
+                        const int  shiftNum,
+                        const int  offset,
+                        const int  limit,
+                        const ClpRng& clpRng,
+                        const int /* bitDepth: the template argument */ )
+{
+  CHECKD( shiftNum != IF_INTERNAL_PREC + 1 - bitDepth, "BDOF shift" );
+  const int widthG        = width  + 2 * BDOF_EXTEND_SIZE;
+  const int stridePredMC  = widthG + 2;
+        int offsetPos     = widthG * BDOF_EXTEND_SIZE + BDOF_EXTEND_SIZE;
+  const int xUnit         = ( width  >> 2 );
+  const int yUnit         = ( height >> 2 );
+
+  const Pel* srcY0Temp;
+  const Pel* srcY1Temp;
+        Pel *dstY0;
+  
+  int OffPos;
+  int OffPad = 0;
+
+  for( int yu = 0; yu < yUnit; yu++, srcY0 += ( stridePredMC << 2 ), srcY1 += ( stridePredMC << 2 ), dstY += ( dstStride << 2 ), offsetPos += ( widthG << 2 ) )
+  {
+    srcY0Temp = srcY0;
+    srcY1Temp = srcY1;
+    dstY0     = dstY;
+    
+    OffPos = offsetPos;
+    OffPad = ( ( yu * widthG ) << 2 );
+
+#if USE_AVX2
+    for( int xu = 0; xu < xUnit; xu += 2, srcY0Temp += 8, srcY1Temp += 8, dstY0 += 8, OffPos += 8, OffPad += 8 )
+    {
+      int tmpx0, tmpy0, tmpx1, tmpy1;
+
+      //calcBIOSums_SSE<vext>( srcY0Temp + 0, srcY1Temp + 0, gradX0 + OffPad + 0, gradX1 + OffPad + 0, gradY0 + OffPad + 0, gradY1 + OffPad + 0, stridePredMC, bitDepth, limit, tmpx, tmpy );
+      //calcBIOSums_SSE<vext>( srcY0Temp + 0, srcY1Temp + 0, gradX0 + OffPad + 0, gradX1 + OffPad + 0, gradY0 + OffPad + 0, gradY1 + OffPad + 0, stridePredMC, bitDepth, limit, tmpx, tmpy );
+      calcBIOSums2x_AVX2( srcY0Temp, srcY1Temp, gradX0 + OffPad, gradX1 + OffPad, gradY0 + OffPad, gradY1 + OffPad, widthG, bitDepth, limit, tmpx0, tmpx1, tmpy0, tmpy1 );
+
+      //addBIOAvg4_SSE<vext>( srcY0Temp + stridePredMC + 1 + 0, srcY1Temp + stridePredMC + 1 + 0, dstY0 + 0, dstStride, gradX0 + OffPos + 0, gradX1 + OffPos + 0, gradY0 + OffPos + 0, gradY1 + OffPos + 0, widthG, tmpx0, tmpy0, shiftNum, offset, clpRng );
+      //addBIOAvg4_SSE<vext>( srcY0Temp + stridePredMC + 1 + 4, srcY1Temp + stridePredMC + 1 + 4, dstY0 + 4, dstStride, gradX0 + OffPos + 4, gradX1 + OffPos + 4, gradY0 + OffPos + 4, gradY1 + OffPos + 4, widthG, tmpx1, tmpy1, shiftNum, offset, clpRng );
+      addBIOAvg4_2x_AVX2( srcY0Temp + stridePredMC + 1, srcY1Temp + stridePredMC + 1, dstY0, dstStride, gradX0 + OffPos, gradX1 + OffPos, gradY0 + OffPos, gradY1 + OffPos, widthG, tmpx0, tmpx1, tmpy0, tmpy1, IF_INTERNAL_PREC + 1 - bitDepth, offset, clpRng );
+    }  // xu
+#else
+    for( int xu = 0; xu < xUnit; xu++, srcY0Temp += 4, srcY1Temp += 4, dstY0 += 4, OffPos += 4, OffPad += 4 )
+    {
+      int tmpx, tmpy;
+
+      calcBIOSums_SSE<vext>( srcY0Temp, srcY1Temp, gradX0 + OffPad, gradX1 + OffPad, gradY0 + OffPad, gradY1 + OffPad, widthG, bitDepth, limit, tmpx, tmpy );
+
+      addBIOAvg4_SSE<vext> ( srcY0Temp + stridePredMC + 1, srcY1Temp + stridePredMC + 1, dstY0, dstStride, gradX0 + OffPos, gradX1 + OffPos, gradY0 + OffPos, gradY1 + OffPos, widthG, tmpx, tmpy, IF_INTERNAL_PREC + 1 - bitDepth, offset, clpRng );
+    }  // xu
+#endif
+  }  // yu
+#if USE_AVX2
+
+  _mm256_zeroupper();
+#endif
+}
+
+template< X86_VEXT vext>
+void BiOptFlowCoreSIMD( const Pel* srcY0,
+                        const Pel* srcY1,
+                        const Pel* gradX0,
+                        const Pel* gradX1,
+                        const Pel* gradY0,
+                        const Pel* gradY1,
+                        const int  width,
+                        const int  height,
+                              Pel* dstY,
+                        const ptrdiff_t dstStride,
+                        const int  shiftNum,
+                        const int  offset,
+                        const int  limit,
+                        const ClpRng& clpRng,
+                        const int bitDepth )
+{
+  CHECKD( bitDepth != clpRng.bd, "BDOF bit depth" );
+  dispatchBitDepth( clpRng.bd, [&]( auto bd ) { BiOptFlowCoreSIMDBitDepth<vext, decltype( bd )::value>( srcY0, srcY1, gradX0, gradX1, gradY0, gradY1, width, height, dstY, dstStride, shiftNum, offset, limit, clpRng, bitDepth ); } );
+}
+
+#if USE_AVX2
+// BDOF of a 16-wide block (16x16 or 16x8) in one pass: the gradients, the 6x6 window sums of every 4x4 subblock and
+// the corrected average, one row of 16 samples per register. Same output as gradFilter_SSE + the padding in
+// xApplyBDOF + BiOptFlowCoreSIMD, but without writing gradient planes or padding the predictions:
+// - the padding makes every border sample and border gradient a copy of the adjacent inner one, so the per-sample
+//   terms of row -1 equal those of row 0, row H those of row H-1, column -1 those of column 0 and column 16 those of
+//   column 15; the windows (rows 4yu-1..4yu+4, columns 4xu-1..4xu+4) count those inner rows and columns twice;
+// - the gradients still read the unpadded one-sample border of the predictions, as gradFilter_SSE does;
+// - each row's terms are computed once (BiOptFlowCoreSIMD computes the two rows shared by vertically adjacent windows
+//   twice, and 8 columns for every 6 it uses); each column's sum is an int16 sum of the same 6 values as there.
+
+// the five per-sample terms BDOF sums, for 16 columns (int16)
+struct BdofTerms16
+{
+  __m256i absGX, absGY, dIX, dIY, signGYGX;
+};
+
+static inline void addBdofTerms16( BdofTerms16& sum, const BdofTerms16& terms )
+{
+  sum.absGX    = _mm256_add_epi16( sum.absGX,    terms.absGX );
+  sum.absGY    = _mm256_add_epi16( sum.absGY,    terms.absGY );
+  sum.dIX      = _mm256_add_epi16( sum.dIX,      terms.dIX );
+  sum.dIY      = _mm256_add_epi16( sum.dIY,      terms.dIY );
+  sum.signGYGX = _mm256_add_epi16( sum.signGYGX, terms.signGYGX );
+}
+
+// the gradient differences of one row that the average needs
+struct BdofGradDiff16
+{
+  int16_t x[16];   // gradX0 - gradX1
+  int16_t y[16];   // gradY0 - gradY1
+};
+
+static inline __m256i loadPel16( const Pel* src )
+{
+  return _mm256_loadu_si256( ( const __m256i* ) src );
+}
+
+// the gradients of one prediction at 16 samples of a row, as gradFilter_SSE: differences of the neighbours >> 6
+static inline void bdofGradients16( const Pel* pred, const ptrdiff_t stride, __m256i& gradX, __m256i& gradY )
+{
+  gradX = _mm256_sub_epi16( _mm256_srai_epi16( loadPel16( pred + 1 ),      6 ), _mm256_srai_epi16( loadPel16( pred - 1 ),      6 ) );
+  gradY = _mm256_sub_epi16( _mm256_srai_epi16( loadPel16( pred + stride ), 6 ), _mm256_srai_epi16( loadPel16( pred - stride ), 6 ) );
+}
+
+// Returns the terms of one row (calcBIOSums2x_AVX2's operations) and also stores the row's gradient differences for
+// the average to gradDiff.
+static inline BdofTerms16 bdofRowTerms16( const Pel* pred0, const Pel* pred1, const ptrdiff_t stride, BdofGradDiff16& gradDiff )
+{
+  __m256i gradX0, gradY0, gradX1, gradY1;
+  bdofGradients16( pred0, stride, gradX0, gradY0 );
+  bdofGradients16( pred1, stride, gradX1, gradY1 );
+  _mm256_storeu_si256( ( __m256i* ) gradDiff.x, _mm256_sub_epi16( gradX0, gradX1 ) );
+  _mm256_storeu_si256( ( __m256i* ) gradDiff.y, _mm256_sub_epi16( gradY0, gradY1 ) );
+
+  const __m256i gX = _mm256_srai_epi16( _mm256_add_epi16( gradX0, gradX1 ), 1 );
+  const __m256i gY = _mm256_srai_epi16( _mm256_add_epi16( gradY0, gradY1 ), 1 );
+  const __m256i dI = _mm256_sub_epi16( _mm256_srai_epi16( loadPel16( pred1 ), 4 ), _mm256_srai_epi16( loadPel16( pred0 ), 4 ) );
+  return { _mm256_abs_epi16( gX ), _mm256_abs_epi16( gY ), _mm256_sign_epi16( dI, gX ), _mm256_sign_epi16( dI, gY ), _mm256_sign_epi16( gX, gY ) };
+}
+
+// Partial window sums (int32) of the four subblocks of a subblock row from its 16 column sums v (int16). Subblock k
+// covers columns 4k-1..4k+4, with column -1 = column 0 and column 16 = column 15. Per 128-bit half, 'outer' holds
+// subblock 0 | 3 and 'inner' subblock 1 | 2, each spread over 4 lanes.
+static inline void bdofWindowPartials16( const __m256i v, __m256i& outer, __m256i& inner )
+{
+  // v holds columns 0-7 | 8-15: subblock 0 is columns 0..4 with column 0 twice, subblock 3 columns 11..15 with 15 twice
+  outer = _mm256_madd_epi16( v, _mm256_setr_epi16( 2, 1, 1, 1, 1, 0, 0, 0,   0, 0, 0, 1, 1, 1, 1, 2 ) );
+  // subblocks 1 and 2 are columns 3..8 and 7..12: per half, alignr by 3 samples joins lanes 3..7 of 'low'
+  // (columns 0-7 | 4-11) with lanes 0..2 of 'high' (columns 8-15 | 12-15) to columns 3-10 | 7-14
+  const __m256i low  = _mm256_permute4x64_epi64( v, 0x94 );   // 64-bit quarters 0, 1 | 1, 2
+  const __m256i high = _mm256_permute4x64_epi64( v, 0xfe );   // quarters 2, 3 | 3, 3
+  inner = _mm256_madd_epi16( _mm256_alignr_epi8( high, low, 6 ), _mm256_setr_epi16( 1, 1, 1, 1, 1, 1, 0, 0,   1, 1, 1, 1, 1, 1, 0, 0 ) );
+}
+
+// the window sums of the four subblocks for two terms: lanes 0..3 = subblocks 0..3 of a, lanes 4..7 those of b
+static inline __m256i bdofWindowSums16( const __m256i a, const __m256i b )
+{
+  __m256i outerA, innerA, outerB, innerB;
+  bdofWindowPartials16( a, outerA, innerA );
+  bdofWindowPartials16( b, outerB, innerB );
+  // per half: subblocks 0 | 3 of a, 1 | 2 of a, 0 | 3 of b, 1 | 2 of b
+  const __m256i sums = _mm256_hadd_epi32( _mm256_hadd_epi32( outerA, innerA ), _mm256_hadd_epi32( outerB, innerB ) );
+  return _mm256_permutevar8x32_epi32( sums, _mm256_setr_epi32( 0, 1, 5, 4, 2, 3, 7, 6 ) );
+}
+
+// The motion refinements (tmpx, tmpy) of the four subblocks, computed as calcBIOSums2x_AVX2 does for each, from the
+// window sums absG = absGX | absGY, dI = dIX | dIY and signGYGX (lanes 0..3 | 4..7 = subblocks 0..3). Returns per
+// subblock the (tmpx, tmpy) int16 pair the average's madd uses: (tmpx & 0xffff) | (tmpy << 16).
+static inline __m128i bdofMotion16( const __m256i absG, const __m256i dI, const __m256i signGYGX, const int limit )
+{
+  // rightShiftMSB( n, d ) = n >> floor( log2( d ) ): the exponent of d as a float (exact, d < 2^24); a zero sum
+  // means no refinement
+  const __m256i msbPos = _mm256_sub_epi32( _mm256_srli_epi32( _mm256_castps_si256( _mm256_cvtepi32_ps( absG ) ), 23 ), _mm256_set1_epi32( 127 ) );
+  const __m256i isZero = _mm256_cmpeq_epi32( absG, _mm256_setzero_si256() );
+  const __m256i vMin   = _mm256_set1_epi32( -limit );
+  const __m256i vMax   = _mm256_set1_epi32( limit );
+  auto refine = [&]( const __m256i numer ) { return _mm256_andnot_si256( isZero, _mm256_min_epi32( vMax, _mm256_max_epi32( vMin, _mm256_srav_epi32( numer, msbPos ) ) ) ); };
+
+  const __m256i dI4  = _mm256_slli_epi32( dI, 2 );
+  const __m256i tmpx = refine( dI4 );   // lanes 0..3
+  // tmpData = sumSignGYGX * tmpx >> 1 with tmpx copied to lanes 4..7 (|product| < 2^20: equals the split form)
+  const __m256i tmpData = _mm256_srai_epi32( _mm256_mullo_epi32( signGYGX, _mm256_permute2x128_si256( tmpx, tmpx, 0x00 ) ), 1 );
+  const __m256i tmpy    = refine( _mm256_sub_epi32( dI4, tmpData ) );   // lanes 4..7
+  return _mm_or_si128( _mm_and_si128( _mm256_castsi256_si128( tmpx ), _mm_set1_epi32( 0xffff ) ), _mm_slli_epi32( _mm256_extracti128_si256( tmpy, 1 ), 16 ) );
+}
+
+// the corrected average of 4 rows (addBIOAvg4_2x_AVX2's operations); motion: the four subblocks' (tmpx, tmpy) pairs
+static inline void bdofAverage4Rows16( const Pel* pred0, const Pel* pred1, const ptrdiff_t predStride, const BdofGradDiff16* gradDiff, Pel* dst, const ptrdiff_t dstStride,
+                                       const __m128i motion, const int shiftNum, const int offset, const ClpRng& clpRng )
+{
+  // unpacklo / unpackhi of a row give columns 0-3 | 8-11 and 4-7 | 12-15, which belong to subblocks 0 | 2 and 1 | 3
+  const __m256i motionLo = _mm256_permutevar8x32_epi32( _mm256_castsi128_si256( motion ), _mm256_setr_epi32( 0, 0, 0, 0, 2, 2, 2, 2 ) );
+  const __m256i motionHi = _mm256_permutevar8x32_epi32( _mm256_castsi128_si256( motion ), _mm256_setr_epi32( 1, 1, 1, 1, 3, 3, 3, 3 ) );
+  const __m256i ones     = _mm256_set1_epi16( 1 );
+  const __m256i vOffset  = _mm256_set1_epi32( offset );
+  const __m256i vMin     = _mm256_set1_epi32( clpRng.min() );
+  const __m256i vMax     = _mm256_set1_epi32( clpRng.max() );
+
+  for( int y = 0; y < 4; y++, pred0 += predStride, pred1 += predStride, gradDiff++, dst += dstStride )
+  {
+    const __m256i gradDiffX = _mm256_loadu_si256( ( const __m256i* ) gradDiff->x );
+    const __m256i gradDiffY = _mm256_loadu_si256( ( const __m256i* ) gradDiff->y );
+    const __m256i src0      = loadPel16( pred0 );
+    const __m256i src1      = loadPel16( pred1 );
+    // tmpx * gradDiffX + tmpy * gradDiffY + src0 + src1 in int32: madd of the interleaved pairs (with ones: src0 + src1)
+    __m256i lo = _mm256_add_epi32( _mm256_madd_epi16( _mm256_unpacklo_epi16( gradDiffX, gradDiffY ), motionLo ), _mm256_madd_epi16( _mm256_unpacklo_epi16( src0, src1 ), ones ) );
+    __m256i hi = _mm256_add_epi32( _mm256_madd_epi16( _mm256_unpackhi_epi16( gradDiffX, gradDiffY ), motionHi ), _mm256_madd_epi16( _mm256_unpackhi_epi16( src0, src1 ), ones ) );
+    lo = _mm256_min_epi32( vMax, _mm256_max_epi32( vMin, _mm256_srai_epi32( _mm256_add_epi32( lo, vOffset ), shiftNum ) ) );
+    hi = _mm256_min_epi32( vMax, _mm256_max_epi32( vMin, _mm256_srai_epi32( _mm256_add_epi32( hi, vOffset ), shiftNum ) ) );
+    // packs restores the column order; the values are clipped already, so it does not saturate
+    _mm256_storeu_si256( ( __m256i* ) dst, _mm256_packs_epi32( lo, hi ) );
+  }
+}
+
+// pred0, pred1: the blocks' first samples in the unpadded predictions (one-sample border around them)
+static void BDOF16_AVX2( const Pel* pred0, const Pel* pred1, const ptrdiff_t predStride, const int height, Pel* dst, const ptrdiff_t dstStride,
+                         const int shiftNum, const int offset, const int limit, const ClpRng& clpRng )
+{
+  CHECKD( height != 8 && height != 16, "BDOF16_AVX2: height" );
+  alignas( 32 ) BdofGradDiff16 gradDiff[MAX_BDOF_APPLICATION_REGION];
+
+  // the sum of rows y0-1 and y0 of the next window; row -1 is a copy of row 0
+  BdofTerms16 carry = bdofRowTerms16( pred0, pred1, predStride, gradDiff[0] );
+  addBdofTerms16( carry, carry );
+
+  for( int y0 = 0; y0 < height; y0 += 4 )
+  {
+    BdofTerms16 window = carry;
+    for( int y = y0 + 1; y < y0 + 3; y++ )
+    {
+      addBdofTerms16( window, bdofRowTerms16( pred0 + y * predStride, pred1 + y * predStride, predStride, gradDiff[y] ) );
+    }
+    const BdofTerms16 lastRow = bdofRowTerms16( pred0 + ( y0 + 3 ) * predStride, pred1 + ( y0 + 3 ) * predStride, predStride, gradDiff[y0 + 3] );
+    addBdofTerms16( window, lastRow );
+    if( y0 + 4 < height )
+    {
+      const BdofTerms16 below = bdofRowTerms16( pred0 + ( y0 + 4 ) * predStride, pred1 + ( y0 + 4 ) * predStride, predStride, gradDiff[y0 + 4] );
+      addBdofTerms16( window, below );
+      carry = lastRow;
+      addBdofTerms16( carry, below );
+    }
+    else
+    {
+      addBdofTerms16( window, lastRow );   // row H is a copy of row H-1
+    }
+
+    const __m128i motion = bdofMotion16( bdofWindowSums16( window.absGX, window.absGY ), bdofWindowSums16( window.dIX, window.dIY ),
+                                         bdofWindowSums16( window.signGYGX, window.signGYGX ), limit );
+    bdofAverage4Rows16( pred0 + y0 * predStride, pred1 + y0 * predStride, predStride, gradDiff + y0, dst + y0 * dstStride, dstStride, motion, shiftNum, offset, clpRng );
+  }
+  _mm256_zeroupper();
+}
+#endif
+
+template< X86_VEXT vext, bool PAD = true>
+void gradFilter_SSE(const Pel* src, int srcStride, int width, int height, int gradStride, Pel* gradX, Pel* gradY, const int bitDepth)
+{
+  const Pel* srcTmp = src + srcStride + 1;
+  Pel* gradXTmp = gradX + gradStride + 1;
+  Pel* gradYTmp = gradY + gradStride + 1;
+
+  int widthInside = width - 2 * BDOF_EXTEND_SIZE;
+  int heightInside = height - 2 * BDOF_EXTEND_SIZE;
+  int shift1 = 6;
+  __m128i mmShift1 = _mm_cvtsi32_si128(shift1);
+  assert((widthInside & 3) == 0);
+
+  if ((widthInside & 7) == 0)
+  {
+    for (int y = 0; y < heightInside; y++)
+    {
+      int x = 0;
+      for (; x < widthInside; x += 8)
+      {
+        __m128i mmPixTop = _mm_sra_epi16(_mm_loadu_si128((__m128i*) (srcTmp + x - srcStride)), mmShift1);
+        __m128i mmPixBottom = _mm_sra_epi16(_mm_loadu_si128((__m128i*) (srcTmp + x + srcStride)), mmShift1);
+        __m128i mmPixLeft = _mm_sra_epi16(_mm_loadu_si128((__m128i*) (srcTmp + x - 1)), mmShift1);
+        __m128i mmPixRight = _mm_sra_epi16(_mm_loadu_si128((__m128i*) (srcTmp + x + 1)), mmShift1);
+
+        __m128i mmGradVer = _mm_sub_epi16(mmPixBottom, mmPixTop);
+        __m128i mmGradHor = _mm_sub_epi16(mmPixRight, mmPixLeft);
+
+        _mm_storeu_si128((__m128i*) (gradYTmp + x), mmGradVer);
+        _mm_storeu_si128((__m128i*) (gradXTmp + x), mmGradHor);
+      }
+
+      gradXTmp += gradStride;
+      gradYTmp += gradStride;
+      srcTmp += srcStride;
+    }
+  }
+  else
+  {
+    __m128i mmPixTop = _mm_sra_epi16(_mm_unpacklo_epi64(_vv_loadl_epi64((__m128i*) (srcTmp - srcStride)), _vv_loadl_epi64((__m128i*) (srcTmp))), mmShift1);
+    for (int y = 0; y < heightInside; y += 2)
+    {
+      __m128i mmPixBottom = _mm_sra_epi16(_mm_unpacklo_epi64(_vv_loadl_epi64((__m128i*) (srcTmp + srcStride)), _vv_loadl_epi64((__m128i*) (srcTmp + (srcStride << 1)))), mmShift1);
+      __m128i mmPixLeft = _mm_sra_epi16(_mm_unpacklo_epi64(_vv_loadl_epi64((__m128i*) (srcTmp - 1)), _vv_loadl_epi64((__m128i*) (srcTmp - 1 + srcStride))), mmShift1);
+      __m128i mmPixRight = _mm_sra_epi16(_mm_unpacklo_epi64(_vv_loadl_epi64((__m128i*) (srcTmp + 1)), _vv_loadl_epi64((__m128i*) (srcTmp + 1 + srcStride))), mmShift1);
+
+      __m128i mmGradVer = _mm_sub_epi16(mmPixBottom, mmPixTop);
+      __m128i mmGradHor = _mm_sub_epi16(mmPixRight, mmPixLeft);
+
+      _vv_storel_epi64((__m128i*) gradYTmp, mmGradVer);
+      _vv_storel_epi64((__m128i*) (gradYTmp + gradStride), _mm_unpackhi_epi64(mmGradVer, mmGradHor));
+      _vv_storel_epi64((__m128i*) gradXTmp, mmGradHor);
+      _vv_storel_epi64((__m128i*) (gradXTmp + gradStride), _mm_unpackhi_epi64(mmGradHor, mmGradVer));
+
+      mmPixTop = mmPixBottom;
+      gradXTmp += gradStride << 1;
+      gradYTmp += gradStride << 1;
+      srcTmp += srcStride << 1;
+    }
+  }
+
+  if (PAD)
+  {
+    gradXTmp = gradX + gradStride + 1;
+    gradYTmp = gradY + gradStride + 1;
+    for (int y = 0; y < heightInside; y++)
+    {
+      gradXTmp[-1] = gradXTmp[0];
+      gradXTmp[widthInside] = gradXTmp[widthInside - 1];
+      gradXTmp += gradStride;
+
+      gradYTmp[-1] = gradYTmp[0];
+      gradYTmp[widthInside] = gradYTmp[widthInside - 1];
+      gradYTmp += gradStride;
+    }
+
+    gradXTmp = gradX + gradStride;
+    gradYTmp = gradY + gradStride;
+    ::memcpy(gradXTmp - gradStride, gradXTmp, sizeof(Pel) * (width));
+    ::memcpy(gradXTmp + heightInside * gradStride, gradXTmp + (heightInside - 1) * gradStride, sizeof(Pel) * (width));
+    ::memcpy(gradYTmp - gradStride, gradYTmp, sizeof(Pel) * (width));
+    ::memcpy(gradYTmp + heightInside * gradStride, gradYTmp + (heightInside - 1) * gradStride, sizeof(Pel) * (width));
+  }
+}
+
+template< X86_VEXT vext >
+void applyPROF_SSE(Pel* dstPel, int dstStride, const Pel* srcPel, int srcStride, int width, int height, const Pel* gradX, const Pel* gradY, int gradStride, const int* dMvX, const int* dMvY, int dMvStride, const bool& bi, int shiftNum, Pel offset, const ClpRng& clpRng)
+{
+  CHECKD( width != 4 || height != 4, "block width error!");
+
+  const int dILimit = 1 << std::max<int>(clpRng.bd + 1, 13);
+
+#if USE_AVX2
+  __m256i mm_dmvx, mm_dmvy, mm_gradx, mm_grady, mm_dI, mm_dI0, mm_src;
+  __m256i mm_offset = _mm256_set1_epi16( offset );
+  __m256i vibdimin  = _mm256_set1_epi16( clpRng.min() );
+  __m256i vibdimax  = _mm256_set1_epi16( clpRng.max() );
+  __m256i mm_dimin  = _mm256_set1_epi32( -dILimit );
+  __m256i mm_dimax  = _mm256_set1_epi32( dILimit - 1 );
+
+  const int *vX0 = dMvX, *vY0 = dMvY;
+  const Pel *gX0 = gradX, *gY0 = gradY;
+
+  // first two rows
+  mm_dmvx = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_loadu_si128( ( const __m128i * ) vX0 ) ), _mm_loadu_si128( ( const __m128i * )( vX0 + dMvStride ) ), 1 );
+  mm_dmvy = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_loadu_si128( ( const __m128i * ) vY0 ) ), _mm_loadu_si128( ( const __m128i * )( vY0 + dMvStride ) ), 1 );
+
+  mm_dmvx = _mm256_packs_epi32( mm_dmvx, _mm256_setzero_si256() );
+  mm_dmvy = _mm256_packs_epi32( mm_dmvy, _mm256_setzero_si256() );
+
+  mm_gradx = _mm256_inserti128_si256( _mm256_castsi128_si256( _vv_loadl_epi64( ( __m128i* )gX0 ) ), _vv_loadl_epi64( ( __m128i* )( gX0 + gradStride ) ), 1 );
+  mm_grady = _mm256_inserti128_si256( _mm256_castsi128_si256( _vv_loadl_epi64( ( __m128i* )gY0 ) ), _vv_loadl_epi64( ( __m128i* )( gY0 + gradStride ) ), 1 );
+  
+  mm_dI0   = _mm256_madd_epi16( _mm256_unpacklo_epi16( mm_dmvx, mm_dmvy ), _mm256_unpacklo_epi16( mm_gradx, mm_grady ) );
+  mm_dI0   = _mm256_min_epi32( mm_dimax, _mm256_max_epi32( mm_dimin, mm_dI0 ) );
+
+  // next two rows
+  vX0 += ( dMvStride << 1 ); vY0 += ( dMvStride << 1 ); gX0 += ( gradStride << 1 ); gY0 += ( gradStride << 1 );
+  
+  mm_dmvx = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_loadu_si128( ( const __m128i * ) vX0 ) ), _mm_loadu_si128( ( const __m128i * )( vX0 + dMvStride ) ), 1 );
+  mm_dmvy = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_loadu_si128( ( const __m128i * ) vY0 ) ), _mm_loadu_si128( ( const __m128i * )( vY0 + dMvStride ) ), 1 );
+
+  mm_dmvx = _mm256_packs_epi32( mm_dmvx, _mm256_setzero_si256() );
+  mm_dmvy = _mm256_packs_epi32( mm_dmvy, _mm256_setzero_si256() );
+
+  mm_gradx = _mm256_inserti128_si256( _mm256_castsi128_si256( _vv_loadl_epi64( ( __m128i* )gX0 ) ), _vv_loadl_epi64( ( __m128i* )( gX0 + gradStride ) ), 1 );
+  mm_grady = _mm256_inserti128_si256( _mm256_castsi128_si256( _vv_loadl_epi64( ( __m128i* )gY0 ) ), _vv_loadl_epi64( ( __m128i* )( gY0 + gradStride ) ), 1 );
+  
+  mm_dI    = _mm256_madd_epi16( _mm256_unpacklo_epi16( mm_dmvx, mm_dmvy ), _mm256_unpacklo_epi16( mm_gradx, mm_grady ) );
+  mm_dI    = _mm256_min_epi32( mm_dimax, _mm256_max_epi32( mm_dimin, mm_dI ) );
+
+  // combine four rows
+  mm_dI = _mm256_packs_epi32( mm_dI0, mm_dI );
+  const Pel* src0 = srcPel + srcStride;
+  mm_src = _mm256_inserti128_si256(
+    _mm256_castsi128_si256(_mm_unpacklo_epi64(_vv_loadl_epi64((const __m128i *)srcPel), _vv_loadl_epi64((const __m128i *)(srcPel + (srcStride << 1))))),
+    _mm_unpacklo_epi64(_vv_loadl_epi64((const __m128i *)src0), _vv_loadl_epi64((const __m128i *)(src0 + (srcStride << 1)))),
+    1
+  );
+  mm_dI = _mm256_add_epi16(mm_dI, mm_src);
+  if (!bi)
+  {
+    mm_dI = _mm256_srai_epi16(_mm256_adds_epi16(mm_dI, mm_offset), shiftNum);
+    mm_dI = _mm256_min_epi16(vibdimax, _mm256_max_epi16(vibdimin, mm_dI));
+  }
+
+  // store final results
+  __m128i dITmp = _mm256_extractf128_si256(mm_dI, 1);
+  Pel* dst0 = dstPel;
+  _vv_storel_epi64((__m128i *)dst0, _mm256_castsi256_si128(mm_dI));
+  dst0 += dstStride; _vv_storel_epi64((__m128i *)dst0, dITmp);
+  dst0 += dstStride; _vv_storel_epi64((__m128i *)dst0, _mm_unpackhi_epi64(_mm256_castsi256_si128(mm_dI), _mm256_castsi256_si128(mm_dI)));
+  dst0 += dstStride; _vv_storel_epi64((__m128i *)dst0, _mm_unpackhi_epi64(dITmp, dITmp));
+#else
+  __m128i mm_dmvx, mm_dmvy, mm_gradx, mm_grady, mm_dI, mm_dI0;
+  __m128i mm_offset = _mm_set1_epi16( offset );
+  __m128i vibdimin  = _mm_set1_epi16( clpRng.min() );
+  __m128i vibdimax  = _mm_set1_epi16( clpRng.max() );
+  __m128i mm_dimin  = _mm_set1_epi32( -dILimit );
+  __m128i mm_dimax  = _mm_set1_epi32( dILimit - 1 );
+
+  for( int h = 0; h < height; h += 2 )
+  {
+    const int* vX = dMvX;
+    const int* vY = dMvY;
+    const Pel* gX = gradX;
+    const Pel* gY = gradY;
+    const Pel* src = srcPel;
+    Pel*       dst = dstPel;
+
+    // first row
+    mm_dmvx  = _mm_packs_epi32( _mm_loadu_si128( ( const __m128i * ) vX ), _mm_setzero_si128() );
+    mm_dmvy  = _mm_packs_epi32( _mm_loadu_si128( ( const __m128i * ) vY ), _mm_setzero_si128() );
+    mm_gradx = _vv_loadl_epi64( ( __m128i* ) gX );
+    mm_grady = _vv_loadl_epi64( ( __m128i* ) gY );
+    mm_dI0   = _mm_madd_epi16 ( _mm_unpacklo_epi16( mm_dmvx, mm_dmvy ), _mm_unpacklo_epi16( mm_gradx, mm_grady ) );
+    mm_dI0   = _mm_min_epi32  ( mm_dimax, _mm_max_epi32( mm_dimin, mm_dI0 ) );
+
+    // second row
+    mm_dmvx  = _mm_packs_epi32( _mm_loadu_si128( ( const __m128i * ) ( vX + dMvStride ) ), _mm_setzero_si128() );
+    mm_dmvy  = _mm_packs_epi32( _mm_loadu_si128( ( const __m128i * ) ( vY + dMvStride ) ), _mm_setzero_si128() );
+    mm_gradx = _vv_loadl_epi64( ( __m128i* ) ( gX + gradStride ) );
+    mm_grady = _vv_loadl_epi64( ( __m128i* ) ( gY + gradStride ) );
+    mm_dI    = _mm_madd_epi16 ( _mm_unpacklo_epi16( mm_dmvx, mm_dmvy ), _mm_unpacklo_epi16( mm_gradx, mm_grady ) );
+    mm_dI    = _mm_min_epi32  ( mm_dimax, _mm_max_epi32( mm_dimin, mm_dI ) );
+
+    // combine both rows
+    mm_dI = _mm_packs_epi32( mm_dI0, mm_dI );
+    mm_dI = _mm_add_epi16  ( _mm_unpacklo_epi64( _vv_loadl_epi64( ( const __m128i * )src ), _vv_loadl_epi64( ( const __m128i * )( src + srcStride ) ) ), mm_dI );
+    if (!bi)
+    {
+      mm_dI = _mm_srai_epi16(_mm_adds_epi16(mm_dI, mm_offset), shiftNum);
+      mm_dI = _mm_min_epi16(vibdimax, _mm_max_epi16(vibdimin, mm_dI));
+    }
+
+    _vv_storel_epi64( ( __m128i * )  dst,                                   mm_dI );
+    _vv_storel_epi64( ( __m128i * )( dst + dstStride ), _mm_unpackhi_epi64( mm_dI, mm_dI ) );
+
+    dMvX   += (dMvStride  << 1);
+    dMvY   += (dMvStride  << 1);
+    gradX  += (gradStride << 1);
+    gradY  += (gradStride << 1);
+    srcPel += (srcStride  << 1);
+    dstPel += (dstStride  << 1);
+  }
+#endif
+}
+
+// One row of the 6x6 PROF window, columns -1 .. 6 of the sub-block row at ref (only -1 .. 4 are used), converted to
+// the 14-bit intermediate format of the prediction with the same 16-bit arithmetic as the scalar border copy.
+// The two extra samples on the right stay inside the picture margin: xPredAffineBlk clips each sub-block MV so that
+// it moves the CU origin at most 7 samples past the right picture edge, the sub-block starts at most CTUSize - 4 into
+// the CU and xOffset adds 1, so the load ends at most CTUSize + 10 samples past the edge, inside the CTUSize + 16
+// margin of the reference pictures (EncStage.h).
+// borderShift is a template argument: an immediate shift, which SIMDE's Neon translation also needs.
+template<int borderShift>
+static ALWAYS_INLINE __m128i profBorderRow( const Pel* ref )
+{
+  const __m128i row = _mm_loadu_si128( ( const __m128i* ) ( ref - 1 ) );
+  return _mm_sub_epi16( _mm_slli_epi16( row, borderShift ), _mm_set1_epi16( IF_INTERNAL_OFFS ) );
+}
+
+// PROF of one 4x4 affine sub-block. pred holds the filtered sub-block, ref its nearest integer position in the
+// reference picture, which supplies the one-sample border. Each window row lives in one register (columns -1 .. 6 in
+// lanes 0 .. 7), so both gradients are register shifts: gradX = right - left two lanes apart, gradY = the row below
+// minus the row above. The arithmetic matches gradFilter_SSE< vext, false > followed by applyPROF_SSE, including the
+// saturating packs and adds. Always inlined into affineLumaCU_SSE, which runs it for every sub-block.
+template<X86_VEXT vext, int borderShift>
+ALWAYS_INLINE void affinePROF4x4_SSE( Pel* dst, int dstStride, const Pel* pred, int predStride, const Pel* ref, int refStride, const int16_t* dMvXY, const bool bi, int shiftNum, Pel offset, const ClpRng& clpRng )
+{
+  const int     dILimit    = 1 << std::max<int>( clpRng.bd + 1, 13 );
+  const __m128i dIMin      = _mm_set1_epi32( -dILimit );
+  const __m128i dIMax      = _mm_set1_epi32( dILimit - 1 );
+
+  // Window rows -1 .. 4, each shifted right by 6 as the gradient filter does: the top and bottom rows come from the
+  // reference only (their corner lanes are never used), the inner rows take the prediction in lanes 1 .. 4 (blend
+  // mask 0x1E).
+  __m128i predRow[4];
+  __m128i window[6];
+  window[0] = _mm_srai_epi16( profBorderRow<borderShift>( ref - refStride ), 6 );
+  for( int r = 0; r < 4; r++ )
+  {
+    predRow[r]        = _vv_loadl_epi64( ( const __m128i* ) ( pred + r * predStride ) );
+    const __m128i row = _mm_blend_epi16( profBorderRow<borderShift>( ref + r * refStride ), _mm_slli_si128( predRow[r], 2 ), 0x1E );
+    window[r + 1]     = _mm_srai_epi16( row, 6 );
+  }
+  window[5] = _mm_srai_epi16( profBorderRow<borderShift>( ref + 4 * refStride ), 6 );
+
+  // dI = dMvX * gradX + dMvY * gradY per sample, clipped to the PROF limit (32 bit, one row per register).
+  __m128i dI[4];
+  for( int r = 0; r < 4; r++ )
+  {
+    const __m128i gradX = _mm_sub_epi16( _mm_srli_si128( window[r + 1], 4 ), window[r + 1] );
+    const __m128i gradY = _mm_srli_si128( _mm_sub_epi16( window[r + 2], window[r] ), 2 );
+    const __m128i dMv   = _mm_loadu_si128( ( const __m128i* ) ( dMvXY + 8 * r ) );
+    dI[r] = _mm_madd_epi16( dMv, _mm_unpacklo_epi16( gradX, gradY ) );
+    dI[r] = _mm_min_epi32( dIMax, _mm_max_epi32( dIMin, dI[r] ) );
+  }
+
+  const __m128i vOffset = _mm_set1_epi16( offset );
+  const __m128i vMin    = _mm_set1_epi16( clpRng.min() );
+  const __m128i vMax    = _mm_set1_epi16( clpRng.max() );
+  for( int r = 0; r < 4; r += 2 )
+  {
+    __m128i res = _mm_add_epi16( _mm_packs_epi32( dI[r], dI[r + 1] ), _mm_unpacklo_epi64( predRow[r], predRow[r + 1] ) );
+    if( !bi )
+    {
+      res = _mm_srai_epi16( _mm_adds_epi16( res, vOffset ), shiftNum );
+      res = _mm_min_epi16( vMax, _mm_max_epi16( vMin, res ) );
+    }
+    _vv_storel_epi64( ( __m128i* ) ( dst + r * dstStride ), res );
+    _vv_storel_epi64( ( __m128i* ) ( dst + ( r + 1 ) * dstStride ), _mm_unpackhi_epi64( res, res ) );
+  }
+}
+
+// The 6-tap 4x4 luma filter of m_filter4x4[0][isLast] without the call, below AVX2; src points at the sub-block.
+template<X86_VEXT vext, bool isLast>
+static ALWAYS_INLINE void affineLumaFilter4x4( const ClpRng& clpRng, const Pel* src, int srcStride, Pel* dst, int dstStride,
+                                               const TFilterCoeff* coeffH, const TFilterCoeff* coeffV, const Filter4x4N6Rounding& rnd )
+{
+  src -= 2 + 2 * srcStride;
+  simdFilter4x4_N6_SSE<isLast, false>( clpRng, src, srcStride, dst, dstStride, coeffH, coeffV, rnd.offset1st, rnd.shift1st, rnd.offset2nd, rnd.shift2nd );
+}
+
+// One luma sub-block of the CU loop: its 4x4 filter into dst. Returns the sub-block's nearest integer position.
+template<X86_VEXT vext, bool isLast>
+static ALWAYS_INLINE const Pel* affineLumaPredict4x4( const InterPredInterpolation::AffineLumaCU& cu, int w, int h,
+                                                      const Filter4x4N6Rounding& rnd, Pel* dst, int dstStride )
+{
+  const AffineLumaSubblockRef r = affineLumaSubblockRef( cu, w, h );
+  affineLumaFilter4x4<vext, isLast>( cu.clpRng, r.ref, cu.refStride, dst, dstStride,
+                                     InterpolationFilter::m_lumaFilter4x4[r.xFrac], InterpolationFilter::m_lumaFilter4x4[r.yFrac], rnd );
+  return r.nearest;
+}
+
+#if USE_AVX2
+// The model terms that do not change from row to row of a CU's sub-blocks, for affineLumaRowRefs_AVX2: the MV change
+// across the 8 sub-blocks of a group (lane k at the centre of sub-block k) and from one group to the next.
+struct AffineLumaRowTerms
+{
+  __m256i horLane, verLane;   // dMvHorX * ( half + 4 k ), dMvHorY * ( half + 4 k )
+  __m256i horGroup, verGroup; // dMvHorX * 32, dMvHorY * 32
+  __m256i colLane;            // 4 k: the sub-block's column in the group
+};
+
+static ALWAYS_INLINE AffineLumaRowTerms affineLumaRowTerms_AVX2( const InterPredInterpolation::AffineLumaCU& cu )
+{
+  const __m256i col  = _mm256_setr_epi32( 0, 4, 8, 12, 16, 20, 24, 28 );
+  const __m256i x    = _mm256_add_epi32( col, _mm256_set1_epi32( AFFINE_MIN_BLOCK_SIZE >> 1 ) );
+  AffineLumaRowTerms t;
+  t.horLane  = _mm256_mullo_epi32( _mm256_set1_epi32( cu.dMvHorX ), x );
+  t.verLane  = _mm256_mullo_epi32( _mm256_set1_epi32( cu.dMvHorY ), x );
+  t.horGroup = _mm256_set1_epi32( cu.dMvHorX * 8 * AFFINE_MIN_BLOCK_SIZE );
+  t.verGroup = _mm256_set1_epi32( cu.dMvHorY * 8 * AFFINE_MIN_BLOCK_SIZE );
+  t.colLane  = col;
+  return t;
+}
+
+// roundAffineMv on 32-bit lanes: ( mv + offset - ( mv >= 0 ) ) >> shift, arithmetic
+static ALWAYS_INLINE __m256i roundAffineMv_AVX2( const __m256i mv, const __m256i offset, const __m128i shift )
+{
+  const __m256i nonNegative = _mm256_cmpgt_epi32( mv, _mm256_set1_epi32( -1 ) );   // -1 where mv >= 0
+  return _mm256_sra_epi32( _mm256_add_epi32( _mm256_add_epi32( mv, offset ), nonNegative ), shift );
+}
+
+// What affineLumaSubblockRef gives for each sub-block i of a CU row, as ready pointers in arrays: affineLumaRowRefs_AVX2
+// fills them 8 sub-blocks at a time with vector stores, and the pair loops load each pointer as it is (an int offset
+// from cu.ref instead costs the pair loop an add per reference row). Sub-block i reads the reference at ref[i] with the
+// m_lumaFilter4x4 rows xFilter[i] and yFilter[i] of its fractions; PROF takes its border from nearest[i] (filled only
+// for PROF).
+struct AffineLumaRowRefs
+{
+  alignas( 32 ) const Pel*          ref    [MAX_CU_SIZE / AFFINE_MIN_BLOCK_SIZE];
+  alignas( 32 ) const Pel*          nearest[MAX_CU_SIZE / AFFINE_MIN_BLOCK_SIZE];
+  alignas( 32 ) const TFilterCoeff* xFilter[MAX_CU_SIZE / AFFINE_MIN_BLOCK_SIZE];
+  alignas( 32 ) const TFilterCoeff* yFilter[MAX_CU_SIZE / AFFINE_MIN_BLOCK_SIZE];
+};
+
+// The 8 pointers base + byteOffset[k] into dst[0..7] (32-byte aligned), for 64-bit pointers (the 32-bit offsets
+// sign-extended) and for 32-bit ones (SIMDe builds this code for non-x86 targets too, so the pointer size, not the
+// architecture, picks the version).
+template<typename T>
+static ALWAYS_INLINE void storePointers_AVX2( const T** dst, const T* base, const __m256i byteOffset, std::true_type /* 64-bit pointers */ )
+{
+  const __m256i b = _mm256_set1_epi64x( ( int64_t ) ( intptr_t ) base );
+  _mm256_store_si256( ( __m256i* ) dst,         _mm256_add_epi64( b, _mm256_cvtepi32_epi64( _mm256_castsi256_si128( byteOffset ) ) ) );
+  _mm256_store_si256( ( __m256i* ) ( dst + 4 ), _mm256_add_epi64( b, _mm256_cvtepi32_epi64( _mm256_extracti128_si256( byteOffset, 1 ) ) ) );
+}
+
+template<typename T>
+static ALWAYS_INLINE void storePointers_AVX2( const T** dst, const T* base, const __m256i byteOffset, std::false_type /* 32-bit pointers */ )
+{
+  static_assert( sizeof( T* ) == 4, "pointers of 32 or 64 bits" );
+  _mm256_store_si256( ( __m256i* ) dst, _mm256_add_epi32( _mm256_set1_epi32( ( int32_t ) ( intptr_t ) base ), byteOffset ) );
+}
+
+template<typename T>
+static ALWAYS_INLINE void storePointers_AVX2( const T** dst, const T* base, const __m256i byteOffset )
+{
+  storePointers_AVX2( dst, base, byteOffset, std::integral_constant<bool, sizeof( T* ) == 8>() );
+}
+
+// affineLumaSubblockRef for the whole sub-block row h of the CU, 8 sub-blocks per vector: the same MVs (stored for the
+// chroma pass), window clamp, fractions and positions, in the same 32-bit integer arithmetic. The row holds an even
+// number of sub-blocks, 2 to 32 (CU widths are powers of 2 from 8); rows of 2 or 4 use the low lanes and store only
+// their own MVs (the lanes past them in rowRefs are not read). Positions as byte offsets stay far inside 32 bits (a
+// reference picture holds well under 2^30 samples).
+template<bool prof>
+static ALWAYS_INLINE void affineLumaRowRefs_AVX2( const InterPredInterpolation::AffineLumaCU& cu, const AffineLumaRowTerms& t,
+                                                  int h, AffineLumaRowRefs& rowRefs )
+{
+  static_assert( sizeof( InterpolationFilter::m_lumaFilter4x4[0] ) == 16, "a fraction's filter row is 16 bytes: fraction << 4" );
+  const int     numSub = cu.width / AFFINE_MIN_BLOCK_SIZE;
+  const int     y      = ( AFFINE_MIN_BLOCK_SIZE >> 1 ) + h;
+  const __m128i shift  = _mm_cvtsi32_si128( cu.roundShift );
+  const __m256i offset = _mm256_set1_epi32( 1 << ( cu.roundShift - 1 ) );
+  const __m256i mvMin  = _mm256_set1_epi32( -( 1 << 17 ) );   // clipToStorageBitDepth
+  const __m256i mvMax  = _mm256_set1_epi32( ( 1 << 17 ) - 1 );
+  const __m256i stride = _mm256_set1_epi32( cu.refStride );
+  __m256i hor = _mm256_add_epi32( _mm256_set1_epi32( cu.mvScaleHor + cu.dMvVerX * y ), t.horLane );
+  __m256i ver = _mm256_add_epi32( _mm256_set1_epi32( cu.mvScaleVer + cu.dMvVerY * y ), t.verLane );
+  Mv*     stored = cu.storedMv + ( h / AFFINE_MIN_BLOCK_SIZE ) * cu.storedMvStride;
+
+  for( int i = 0; i < numSub; i += 8 )
+  {
+    const __m256i mvHor = _mm256_min_epi32( mvMax, _mm256_max_epi32( mvMin, roundAffineMv_AVX2( hor, offset, shift ) ) );
+    const __m256i mvVer = _mm256_min_epi32( mvMax, _mm256_max_epi32( mvMin, roundAffineMv_AVX2( ver, offset, shift ) ) );
+
+    // the Mvs { hor, ver } of sub-blocks 0-3 and 4-7 in memory order
+    const __m256i lo    = _mm256_unpacklo_epi32( mvHor, mvVer );   // 0, 1 | 4, 5
+    const __m256i hi    = _mm256_unpackhi_epi32( mvHor, mvVer );   // 2, 3 | 6, 7
+    const __m256i first = _mm256_permute2x128_si256( lo, hi, 0x20 );
+    if( numSub >= 8 )
+    {
+      _mm256_storeu_si256( ( __m256i* ) ( stored + i ), first );
+      _mm256_storeu_si256( ( __m256i* ) ( stored + i + 4 ), _mm256_permute2x128_si256( lo, hi, 0x31 ) );
+    }
+    else if( numSub == 4 )
+    {
+      _mm256_storeu_si256( ( __m256i* ) stored, first );
+    }
+    else
+    {
+      _mm_storeu_si128( ( __m128i* ) stored, _mm256_castsi256_si128( first ) );
+    }
+
+    // the reference fetch: the MV clamped to the window, its fractions, and the sample offsets from cu.ref of the
+    // position and of the nearest integer position
+    const __m256i refHor  = _mm256_min_epi32( _mm256_set1_epi32( cu.horMax ), _mm256_max_epi32( _mm256_set1_epi32( cu.horMin ), mvHor ) );
+    const __m256i refVer  = _mm256_min_epi32( _mm256_set1_epi32( cu.verMax ), _mm256_max_epi32( _mm256_set1_epi32( cu.verMin ), mvVer ) );
+    const __m256i xFrac   = _mm256_and_si256( refHor, _mm256_set1_epi32( 15 ) );
+    const __m256i yFrac   = _mm256_and_si256( refVer, _mm256_set1_epi32( 15 ) );
+    const __m256i column  = _mm256_add_epi32( _mm256_set1_epi32( i * AFFINE_MIN_BLOCK_SIZE ), t.colLane );
+    const __m256i row     = _mm256_add_epi32( _mm256_set1_epi32( h ), _mm256_srai_epi32( refVer, 4 ) );
+    const __m256i pos     = _mm256_add_epi32( _mm256_mullo_epi32( row, stride ), _mm256_add_epi32( column, _mm256_srai_epi32( refHor, 4 ) ) );
+    storePointers_AVX2( &rowRefs.ref[i], cu.ref, _mm256_slli_epi32( pos, 1 ) );   // Pel: 2 bytes
+    storePointers_AVX2( &rowRefs.xFilter[i], InterpolationFilter::m_lumaFilter4x4[0], _mm256_slli_epi32( xFrac, 4 ) );
+    storePointers_AVX2( &rowRefs.yFilter[i], InterpolationFilter::m_lumaFilter4x4[0], _mm256_slli_epi32( yFrac, 4 ) );
+    if( prof )
+    {
+      const __m256i nearest = _mm256_add_epi32( pos, _mm256_add_epi32( _mm256_mullo_epi32( _mm256_srli_epi32( yFrac, 3 ), stride ),
+                                                                       _mm256_srli_epi32( xFrac, 3 ) ) );
+      storePointers_AVX2( &rowRefs.nearest[i], cu.ref, _mm256_slli_epi32( nearest, 1 ) );
+    }
+    hor = _mm256_add_epi32( hor, t.horGroup );
+    ver = _mm256_add_epi32( ver, t.verGroup );
+  }
+}
+#endif
+
+#if USE_AVX2
+// Coefficient pair (k, k + 1) of the left sub-block's filter in the low 128-bit lane, of the right one's in the high lane:
+// two broadcasts from memory joined by a vpblendd, which unlike the insert of a 128-bit register does not take the
+// shuffle port the pair filter is busiest on.
+static ALWAYS_INLINE __m256i coeffPairLanes( const TFilterCoeff* left, const TFilterCoeff* right, int k )
+{
+  return _mm256_blend_epi32( _mm256_set1_epi32( xCoeffPair( left + k ) ), _mm256_set1_epi32( xCoeffPair( right + k ) ), 0xF0 );
+}
+
+// The 4x4 6-tap filter of two side-by-side sub-blocks in one pass, the left one in the low 128-bit lane and the right
+// one in the high lane, each with its own fractions. Per lane these are the sums of simdFilter4x4_N6_AVX2<isLast>, with
+// the first stage's offset moved into the second stage (see below), and the same clip, so the results are identical.
+// Used for all luma sub-blocks at AVX2: without PROF it stores through storeRowsOfPair_AVX2, in four rows of 8 samples
+// each per pair. The output is in the layout affinePROF4x4Pair_AVX2 works in: pred[0] holds rows 0 and 1 of each
+// sub-block (row 0 in the low 64 bits of its lane), pred[1] rows 2 and 3. Unlike a filter per sub-block, the hand-off
+// to PROF needs no reorder across the lanes and no trip through memory.
+// srcLeft and srcRight point at the sub-blocks; the reads are those of the single 4x4 filter.
+template<bool isLast>
+static ALWAYS_INLINE void affineLumaFilter4x4Pair_AVX2( const Pel* srcLeft, const Pel* srcRight, int srcStride,
+                                                        const TFilterCoeff* coeffHLeft, const TFilterCoeff* coeffHRight,
+                                                        const TFilterCoeff* coeffVLeft, const TFilterCoeff* coeffVRight,
+                                                        const Filter4x4N6Rounding& rnd, const ClpRng& clpRng, __m256i* pred )
+{
+  srcLeft  -= 2 + 2 * srcStride;
+  srcRight -= 2 + 2 * srcStride;
+  const __m256i h12 = coeffPairLanes( coeffHLeft, coeffHRight, 1 );
+  const __m256i h34 = coeffPairLanes( coeffHLeft, coeffHRight, 3 );
+  const __m256i h56 = coeffPairLanes( coeffHLeft, coeffHRight, 5 );
+
+  // horizontal filter of the 9 rows the 4 output rows need: rows[y] holds row y of both sub-blocks as 32-bit values.
+  // The first stage's offset is left out: offset1st = -( IF_INTERNAL_OFFS << shift1st ) is a multiple of 1 << shift1st,
+  // so ( sum + offset1st ) >> shift1st = ( sum >> shift1st ) - IF_INTERNAL_OFFS exactly, and as each vertical filter's
+  // taps sum up to 1 << IF_FILTER_PREC, the second stage subtracts IF_INTERNAL_OFFS << IF_FILTER_PREC once instead (off2).
+  // Without the offset the rows lie in [-5627, 21994] (taps: at most 86 positive, 22 negative; bit depth 8 or 10), so
+  // they still fit 16 bits. At bit depth 8 shift1st is 0, and the first stage is the multiply-adds alone.
+  __m256i rows[9];
+  for( int y = 0; y < 9; y++ )
+  {
+    const Pel*    left  = srcLeft  + y * srcStride;
+    const Pel*    right = srcRight + y * srcStride;
+    const __m256i from0 = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_loadu_si128( ( const __m128i* ) left ) ),
+                                                   _mm_loadu_si128( ( const __m128i* ) right ), 1 );               // samples 0..7
+    const __m256i from1 = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_loadu_si128( ( const __m128i* ) ( left + 1 ) ) ),
+                                                   _mm_loadu_si128( ( const __m128i* ) ( right + 1 ) ), 1 );       // samples 1..8
+    const __m256i samplePairs0 = _mm256_unpacklo_epi16( from0, from1 );                  // (0,1) (1,2) (2,3) (3,4)
+    const __m256i samplePairs4 = _mm256_unpackhi_epi16( from0, from1 );                  // (4,5) (5,6) (6,7) (7,8)
+    const __m256i samplePairs2 = _mm256_alignr_epi8( samplePairs4, samplePairs0, 8 );    // (2,3) (3,4) (4,5) (5,6)
+    __m256i sum = _mm256_madd_epi16( samplePairs0, h12 );
+    sum = _mm256_add_epi32( sum, _mm256_madd_epi16( samplePairs2, h34 ) );
+    sum = _mm256_add_epi32( sum, _mm256_madd_epi16( samplePairs4, h56 ) );
+    rows[y] = _mm256_srai_epi32( sum, rnd.shift1st );
+  }
+
+  // vertical filter: rowPairs[y] holds rows y and y + 1 as interleaved 16-bit values, so output row y is three
+  // multiply-adds, of the pairs (y, y + 1), (y + 2, y + 3) and (y + 4, y + 5). As the rows fit 16 bits, the low half
+  // of each 32-bit value is the row's value: a pair is row y's low half and row y + 1's low half shifted up.
+  __m256i rowPairs[8];
+  for( int y = 0; y < 8; y++ )
+  {
+    rowPairs[y] = _mm256_blend_epi16( rows[y], _mm256_slli_epi32( rows[y + 1], 16 ), 0xAA );
+  }
+  const __m256i v12  = coeffPairLanes( coeffVLeft, coeffVRight, 1 );
+  const __m256i v34  = coeffPairLanes( coeffVLeft, coeffVRight, 3 );
+  const __m256i v56  = coeffPairLanes( coeffVLeft, coeffVRight, 5 );
+  const __m256i off2 = _mm256_set1_epi32( rnd.offset2nd - ( IF_INTERNAL_OFFS << IF_FILTER_PREC ) );
+  __m256i out[4];
+  for( int y = 0; y < 4; y++ )
+  {
+    __m256i sum = _mm256_add_epi32( off2, _mm256_madd_epi16( rowPairs[y], v12 ) );
+    sum = _mm256_add_epi32( sum, _mm256_madd_epi16( rowPairs[y + 2], v34 ) );
+    sum = _mm256_add_epi32( sum, _mm256_madd_epi16( rowPairs[y + 4], v56 ) );
+    out[y] = _mm256_srai_epi32( sum, rnd.shift2nd );
+  }
+  if( isLast )
+  {
+    const __m256i maxSample = _mm256_set1_epi16( clpRng.max() );
+    pred[0] = packClipLast_AVX2( out[0], out[1], maxSample );
+    pred[1] = packClipLast_AVX2( out[2], out[3], maxSample );
+  }
+  else
+  {
+    pred[0] = _mm256_packs_epi32( out[0], out[1] );
+    pred[1] = _mm256_packs_epi32( out[2], out[3] );
+  }
+}
+
+// Stores two rows of two side-by-side sub-blocks, given in the lanes as (left r, left r + 1) and (right r, right r + 1).
+static ALWAYS_INLINE void storeRowsOfPair_AVX2( Pel* dst, int dstStride, __m256i rows )
+{
+  rows = _mm256_permute4x64_epi64( rows, 0xD8 );   // whole rows of 8 samples
+  _mm_storeu_si128( ( __m128i* ) dst, _mm256_castsi256_si128( rows ) );
+  _mm_storeu_si128( ( __m128i* ) ( dst + dstStride ), _mm256_extracti128_si256( rows, 1 ) );
+}
+
+// profBorderRow for two side-by-side sub-blocks, one per 128-bit lane.
+template<int borderShift>
+static ALWAYS_INLINE __m256i profBorderRowPair( const Pel* refLeft, const Pel* refRight )
+{
+  const __m256i row = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_loadu_si128( ( const __m128i* ) ( refLeft - 1 ) ) ),
+                                               _mm_loadu_si128( ( const __m128i* ) ( refRight - 1 ) ), 1 );
+  return _mm256_sub_epi16( _mm256_slli_epi16( row, borderShift ), _mm256_set1_epi16( IF_INTERNAL_OFFS ) );
+}
+
+// affinePROF4x4_SSE for two side-by-side sub-blocks of a CU at once: the left one in the low 128-bit lane, the right
+// one in the high lane. Every step of the 4x4 PROF is lane-local (byte shifts, blend, unpack, madd, packs, adds,
+// min / max), so each lane computes exactly what affinePROF4x4_SSE computes for its sub-block, for about the work of
+// one. pred is the output of affineLumaFilter4x4Pair_AVX2; dMvRows the CU's dMv pairs, row r in both lanes.
+template<bool bi, int borderShift>
+static ALWAYS_INLINE void affinePROF4x4Pair_AVX2( Pel* dst, int dstStride, const __m256i* pred, const Pel* refLeft, const Pel* refRight,
+                                                  int refStride, const __m256i* dMvRows, int shiftNum, Pel offset,
+                                                  const ClpRng& clpRng )
+{
+  const int     dILimit   = 1 << std::max<int>( clpRng.bd + 1, 13 );
+  const __m256i dIMin     = _mm256_set1_epi32( -dILimit );
+  const __m256i dIMax     = _mm256_set1_epi32( dILimit - 1 );
+
+  // Window rows -1 .. 4: prediction row r of each sub-block (from pred, moved to lanes 1 .. 4) between its border
+  // samples. Rows 1 and 3 sit in the high 64 bits of pred's lanes, so they shift right by 6 bytes instead of left by 2.
+  __m256i window[6];
+  window[0] = _mm256_srai_epi16( profBorderRowPair<borderShift>( refLeft - refStride, refRight - refStride ), 6 );
+  for( int r = 0; r < 4; r++ )
+  {
+    const __m256i predRow = r & 1 ? _mm256_bsrli_epi128( pred[r >> 1], 6 ) : _mm256_bslli_epi128( pred[r >> 1], 2 );
+    const __m256i row     = _mm256_blend_epi16( profBorderRowPair<borderShift>( refLeft + r * refStride, refRight + r * refStride ),
+                                                predRow, 0x1E );
+    window[r + 1]     = _mm256_srai_epi16( row, 6 );
+  }
+  window[5] = _mm256_srai_epi16( profBorderRowPair<borderShift>( refLeft + 4 * refStride, refRight + 4 * refStride ), 6 );
+
+  __m256i dI[4];
+  for( int r = 0; r < 4; r++ )
+  {
+    const __m256i gradX = _mm256_sub_epi16( _mm256_bsrli_epi128( window[r + 1], 4 ), window[r + 1] );
+    const __m256i gradY = _mm256_bsrli_epi128( _mm256_sub_epi16( window[r + 2], window[r] ), 2 );
+    dI[r] = _mm256_madd_epi16( dMvRows[r], _mm256_unpacklo_epi16( gradX, gradY ) );
+    dI[r] = _mm256_min_epi32( dIMax, _mm256_max_epi32( dIMin, dI[r] ) );
+  }
+
+  const __m256i vOffset = _mm256_set1_epi16( offset );
+  const __m256i vMin    = _mm256_set1_epi16( clpRng.min() );
+  const __m256i vMax    = _mm256_set1_epi16( clpRng.max() );
+  for( int r = 0; r < 4; r += 2 )
+  {
+    __m256i res = _mm256_add_epi16( _mm256_packs_epi32( dI[r], dI[r + 1] ), pred[r >> 1] );
+    if( !bi )
+    {
+      res = _mm256_srai_epi16( _mm256_adds_epi16( res, vOffset ), shiftNum );
+      res = _mm256_min_epi16( vMax, _mm256_max_epi16( vMin, res ) );
+    }
+    storeRowsOfPair_AVX2( dst + r * dstStride, dstStride, res );
+  }
+}
+#endif
+
+// xPredAffineBlk's luma sub-block loop in one call, so the filter and PROF of each sub-block need no call of their own.
+// Every sub-block goes through the 2-D 4x4 filter, whatever its fractions: a zero fraction takes the identity taps
+// m_lumaFilter4x4[0] = { 0, 0, 0, 64, 0, 0, 0, 0 }, which give exactly the horizontal-only, vertical-only and copy
+// results of m_if's filterHor and filterVer (the identity stage stays within 14 bits, so no pack saturates), with no
+// branch on the fractions. So every sub-block reads the 2-D footprint, rows and columns -2 .. +6 of the sub-block
+// (columns to +8 with SSE41), as a 2-D sub-block already does anywhere inside the MV clip window: at most
+// CTUSize + 9 (SSE41: + 11) samples past the right or bottom picture edge and CTUSize + 9 before the left or top
+// one, inside the CTUSize + 16 margin of the reference pictures (EncStage.h).
+// Instantiated per internal bit depth: the filter's shifts, the PROF border shift and shiftNum are constants, which the
+// always-inlined sub-block functions take as immediates.
+template<X86_VEXT vext, bool prof, bool bi, int bitDepth>
+static void affineLumaCUBitDepth( const InterPredInterpolation::AffineLumaCU& cu )
+{
+  constexpr bool isLast   = !prof && !bi;   // as in xPredAffineBlk: PROF works on the 14-bit prediction
+  static_assert( bitDepth == 8 || bitDepth == 10, "affineLumaFilter4x4Pair_AVX2's 16-bit rows hold for bit depths 8 and 10" );
+  constexpr Filter4x4N6Rounding rnd = filter4x4N6Rounding<isLast>( bitDepth );
+  static_assert( rnd.offset1st == -( IF_INTERNAL_OFFS << rnd.shift1st ), "affineLumaFilter4x4Pair_AVX2 moves this offset into its second stage" );
+  constexpr int  shiftNum = std::max<int>( 2, IF_INTERNAL_PREC - bitDepth );
+  CHECKD( cu.shiftNum != shiftNum, "affine shiftNum" );
+
+#if USE_AVX2
+  if( vext >= AVX2 && prof )
+  {
+    // PROF two sub-blocks at a time, one per 128-bit lane; every row of an affine CU holds an even number of them
+    __m256i dMvRows[4];
+    for( int r = 0; r < 4; r++ )
+    {
+      dMvRows[r] = _mm256_broadcastsi128_si256( _mm_loadu_si128( ( const __m128i* ) ( cu.dMvXY + 8 * r ) ) );
+    }
+    const AffineLumaRowTerms rowTerms = affineLumaRowTerms_AVX2( cu );
+    AffineLumaRowRefs        rowRefs;
+    for( int h = 0; h < cu.height; h += AFFINE_MIN_BLOCK_SIZE )
+    {
+      affineLumaRowRefs_AVX2<true>( cu, rowTerms, h, rowRefs );
+      for( int w = 0; w < cu.width; w += 2 * AFFINE_MIN_BLOCK_SIZE )
+      {
+        const int left  = w / AFFINE_MIN_BLOCK_SIZE;
+        const int right = left + 1;
+        __m256i pred[2];
+        affineLumaFilter4x4Pair_AVX2<false>( rowRefs.ref[left], rowRefs.ref[right], cu.refStride, rowRefs.xFilter[left], rowRefs.xFilter[right],
+                                             rowRefs.yFilter[left], rowRefs.yFilter[right], rnd, cu.clpRng, pred );
+        affinePROF4x4Pair_AVX2<bi, shiftNum>( cu.dst + h * cu.dstStride + w, cu.dstStride, pred, rowRefs.nearest[left], rowRefs.nearest[right],
+                                              cu.refStride, dMvRows, shiftNum, cu.offset, cu.clpRng );
+      }
+    }
+    _mm256_zeroupper();
+    return;
+  }
+#endif
+
+  if( !prof )
+  {
+    // A row of sub-blocks in two passes, all their reference positions first, then the filters back to back: the
+    // filter's loads then do not wait for each sub-block's MV arithmetic.
+    const int             numSub = cu.width / AFFINE_MIN_BLOCK_SIZE;
+    AffineLumaSubblockRef rowRefs[MAX_CU_SIZE / AFFINE_MIN_BLOCK_SIZE];
+#if USE_AVX2
+    const AffineLumaRowTerms rowTerms = affineLumaRowTerms_AVX2( cu );
+    AffineLumaRowRefs        rowRefsAvx2;
+#endif
+    for( int h = 0; h < cu.height; h += AFFINE_MIN_BLOCK_SIZE )
+    {
+      Pel* dst = cu.dst + h * cu.dstStride;
+#if USE_AVX2
+      if( vext >= AVX2 )
+      {
+        affineLumaRowRefs_AVX2<false>( cu, rowTerms, h, rowRefsAvx2 );
+        // two sub-blocks per pass, one per 128-bit lane; every row of an affine CU holds an even number of them
+        for( int left = 0; left < numSub; left += 2, dst += 2 * AFFINE_MIN_BLOCK_SIZE )
+        {
+          const int right = left + 1;
+          __m256i pred[2];
+          affineLumaFilter4x4Pair_AVX2<isLast>( rowRefsAvx2.ref[left], rowRefsAvx2.ref[right], cu.refStride, rowRefsAvx2.xFilter[left],
+                                                rowRefsAvx2.xFilter[right], rowRefsAvx2.yFilter[left], rowRefsAvx2.yFilter[right], rnd, cu.clpRng, pred );
+          storeRowsOfPair_AVX2( dst, cu.dstStride, pred[0] );
+          storeRowsOfPair_AVX2( dst + 2 * cu.dstStride, cu.dstStride, pred[1] );
+        }
+        continue;
+      }
+#endif
+      for( int i = 0; i < numSub; i++ )
+      {
+        rowRefs[i] = affineLumaSubblockRef( cu, i * AFFINE_MIN_BLOCK_SIZE, h );
+      }
+      for( int i = 0; i < numSub; i++, dst += AFFINE_MIN_BLOCK_SIZE )
+      {
+        affineLumaFilter4x4<vext, isLast>( cu.clpRng, rowRefs[i].ref, cu.refStride, dst, cu.dstStride,
+                                           InterpolationFilter::m_lumaFilter4x4[rowRefs[i].xFrac],
+                                           InterpolationFilter::m_lumaFilter4x4[rowRefs[i].yFrac], rnd );
+      }
+    }
+  }
+  else
+  {
+    // PROF below AVX2: each sub-block filtered into a small buffer (its stores forward to PROF's loads), then refined
+    for( int h = 0; h < cu.height; h += AFFINE_MIN_BLOCK_SIZE )
+    {
+      for( int w = 0; w < cu.width; w += AFFINE_MIN_BLOCK_SIZE )
+      {
+        alignas( 16 ) Pel pred[AFFINE_MIN_BLOCK_SIZE * AFFINE_MIN_BLOCK_SIZE];
+        const Pel* refNearest = affineLumaPredict4x4<vext, isLast>( cu, w, h, rnd, pred, AFFINE_MIN_BLOCK_SIZE );
+        affinePROF4x4_SSE<vext, shiftNum>( cu.dst + h * cu.dstStride + w, cu.dstStride, pred, AFFINE_MIN_BLOCK_SIZE, refNearest,
+                                           cu.refStride, cu.dMvXY, bi, shiftNum, cu.offset, cu.clpRng );
+      }
+    }
+  }
+#if USE_AVX2
+  if( vext >= AVX2 )
+  {
+    _mm256_zeroupper();
+  }
+#endif
+}
+
+template<X86_VEXT vext, bool prof, bool bi>
+void affineLumaCU_SSE( const InterPredInterpolation::AffineLumaCU& cu )
+{
+  dispatchBitDepth( cu.clpRng.bd, [&]( auto bd ) { affineLumaCUBitDepth<vext, prof, bi, decltype( bd )::value>( cu ); } );
+}
+
+template<X86_VEXT vext>
+void padDmvr_SSE( const Pel* src, const int srcStride, Pel* dst, const int dstStride, int width, int height, int padSize )
+{
+  _mm_prefetch( ( const char* )  src,            _MM_HINT_T0 );
+  _mm_prefetch( ( const char* ) &src[srcStride], _MM_HINT_T0 );
+
+  if( width == 7 && padSize == 1 )
+  {
+    const __m128i sl = _mm_setr_epi8( 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 12, 13 );
+    __m128i l = _mm_shuffle_epi8( _mm_loadu_si128( ( const __m128i* ) src ), sl );
+
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 1 * dstStride - 1 ), l );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 1 * dstStride     ), l );
+
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 0 * dstStride - 1 ), l );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 0 * dstStride     ), l );
+
+    for( height--, dst += dstStride, src += srcStride; height > 0; height--, src += srcStride, dst += dstStride )
+    {
+      _mm_prefetch( ( const char* ) &src[srcStride], _MM_HINT_T0 );
+
+      l = _mm_shuffle_epi8( _mm_loadu_si128( ( const __m128i* ) src ), sl );
+
+      _mm_storeu_si16 ( ( __m128i* ) ( dst - 1 ), l );
+      _mm_storeu_si128( ( __m128i* ) ( dst     ), l );
+    }
+
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 1 ), l );
+    _mm_storeu_si128( ( __m128i* ) ( dst     ), l );
+  }
+  else if( width == 11 && padSize == 1 )
+  {
+    const __m128i sl = _mm_setr_epi8( 0, 1, 2, 3, 4, 5, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15 );
+    __m128i l0 =                   _mm_loadu_si128( ( const __m128i* ) &src[0] );
+    __m128i l1 = _mm_shuffle_epi8( _vv_loadl_epi64( ( const __m128i* ) &src[8] ), sl );
+
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 1 * dstStride - 1 ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 1 * dstStride     ), l0 );
+    _vv_storel_epi64( ( __m128i* ) ( dst - 1 * dstStride + 8 ), l1 );
+
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 0 * dstStride - 1 ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 0 * dstStride     ), l0 );
+    _vv_storel_epi64( ( __m128i* ) ( dst - 0 * dstStride + 8 ), l1 );
+
+    for( height--, dst += dstStride, src += srcStride; height > 0; height--, src += srcStride, dst += dstStride )
+    {
+      _mm_prefetch( ( const char* ) &src[srcStride], _MM_HINT_T0 );
+
+      l0 =                   _mm_loadu_si128( ( const __m128i* ) &src[0] );
+      l1 = _mm_shuffle_epi8( _vv_loadl_epi64( ( const __m128i* ) &src[8] ), sl );
+
+      _mm_storeu_si16 ( ( __m128i* ) ( dst - 1 ), l0 );
+      _mm_storeu_si128( ( __m128i* ) ( dst     ), l0 );
+      _vv_storel_epi64( ( __m128i* ) ( dst + 8 ), l1 );
+    }
+    
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 1 ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst     ), l0 );
+    _vv_storel_epi64( ( __m128i* ) ( dst + 8 ), l1 );
+  }
+  else if( width == 15 && padSize == 2 )
+  {
+    const __m128i sl = _mm_setr_epi8(  0,  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 12, 13 );
+    const __m128i sb = _mm_setr_epi8(  0,  1, 0, 1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 );
+    const __m128i se = _mm_setr_epi8( 12, 13, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 );
+    __m128i l0 =                   _mm_loadu_si128( ( const __m128i* ) &src[0] );
+    __m128i l1 = _mm_shuffle_epi8( _mm_loadu_si128( ( const __m128i* ) &src[8] ), sl );
+    __m128i b  = _mm_shuffle_epi8( l0, sb );
+    __m128i e  = _mm_shuffle_epi8( l1, se );
+
+    _mm_storeu_si32 ( ( __m128i* ) ( dst - 2 * dstStride -  2 ), b  );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 2 * dstStride      ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 2 * dstStride +  8 ), l1 );
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 2 * dstStride + 16 ), e  );
+
+    _mm_storeu_si32 ( ( __m128i* ) ( dst - 1 * dstStride -  2 ), b  );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 1 * dstStride      ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 1 * dstStride +  8 ), l1 );
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 1 * dstStride + 16 ), e  );
+
+    _mm_storeu_si32 ( ( __m128i* ) ( dst - 0 * dstStride -  2 ), b  );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 0 * dstStride      ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 0 * dstStride +  8 ), l1 );
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 0 * dstStride + 16 ), e  );
+
+    for( height--, dst += dstStride, src += srcStride; height > 0; height--, src += srcStride, dst += dstStride )
+    {
+      _mm_prefetch( ( const char* ) &src[srcStride], _MM_HINT_T0 );
+
+      l0 =                   _mm_loadu_si128( ( const __m128i* ) &src[0] );
+      l1 = _mm_shuffle_epi8( _mm_loadu_si128( ( const __m128i* ) &src[8] ), sl );
+      b = _mm_shuffle_epi8( l0, sb );
+      e = _mm_shuffle_epi8( l1, se );
+      
+      _mm_storeu_si32 ( ( __m128i* ) ( dst -  2 ), b  );
+      _mm_storeu_si128( ( __m128i* ) ( dst      ), l0 );
+      _mm_storeu_si128( ( __m128i* ) ( dst +  8 ), l1 );
+      _mm_storeu_si16 ( ( __m128i* ) ( dst + 16 ), e  );
+    }
+    
+    _mm_storeu_si32 ( ( __m128i* ) ( dst -  2 ), b  );
+    _mm_storeu_si128( ( __m128i* ) ( dst      ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst +  8 ), l1 );
+    _mm_storeu_si16 ( ( __m128i* ) ( dst + 16 ), e  );
+
+    dst += dstStride;
+
+    _mm_storeu_si32 ( ( __m128i* ) ( dst -  2 ), b  );
+    _mm_storeu_si128( ( __m128i* ) ( dst      ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst +  8 ), l1 );
+    _mm_storeu_si16 ( ( __m128i* ) ( dst + 16 ), e  );
+  }
+  else if( width == 23 && padSize == 2 )
+  {
+    const __m128i sl = _mm_setr_epi8(  0,  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 12, 13 );
+    const __m128i sb = _mm_setr_epi8(  0,  1, 0, 1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 );
+    const __m128i se = _mm_setr_epi8( 12, 13, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 );
+    __m128i l0 =                   _mm_loadu_si128( ( const __m128i* ) &src[ 0] );
+    __m128i l1 =                   _mm_loadu_si128( ( const __m128i* ) &src[ 8] );
+    __m128i l2 = _mm_shuffle_epi8( _mm_loadu_si128( ( const __m128i* ) &src[16] ), sl );
+    __m128i b  = _mm_shuffle_epi8( l0, sb );
+    __m128i e  = _mm_shuffle_epi8( l2, se );
+
+    _mm_storeu_si32 ( ( __m128i* ) ( dst - 2 * dstStride -  2 ), b );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 2 * dstStride      ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 2 * dstStride +  8 ), l1 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 2 * dstStride + 16 ), l2 );
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 2 * dstStride + 24 ), e );
+
+    _mm_storeu_si32 ( ( __m128i* ) ( dst - 1 * dstStride -  2 ), b );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 1 * dstStride      ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 1 * dstStride +  8 ), l1 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 1 * dstStride + 16 ), l2 );
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 1 * dstStride + 24 ), e );
+
+    _mm_storeu_si32 ( ( __m128i* ) ( dst - 0 * dstStride -  2 ), b );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 0 * dstStride      ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 0 * dstStride +  8 ), l1 );
+    _mm_storeu_si128( ( __m128i* ) ( dst - 0 * dstStride + 16 ), l2 );
+    _mm_storeu_si16 ( ( __m128i* ) ( dst - 0 * dstStride + 24 ), e );
+
+    for( height--, dst += dstStride, src += srcStride; height > 0; height--, src += srcStride, dst += dstStride )
+    {
+      _mm_prefetch( ( const char* ) &src[srcStride], _MM_HINT_T0 );
+
+      l0 =                   _mm_loadu_si128( ( const __m128i* ) &src[ 0] );
+      l1 =                   _mm_loadu_si128( ( const __m128i* ) &src[ 8] );
+      l2 = _mm_shuffle_epi8( _mm_loadu_si128( ( const __m128i* ) &src[16] ), sl );
+      b  = _mm_shuffle_epi8( l0, sb );
+      e  = _mm_shuffle_epi8( l2, se );
+
+      _mm_storeu_si32 ( ( __m128i* ) ( dst -  2 ), b );
+      _mm_storeu_si128( ( __m128i* ) ( dst      ), l0 );
+      _mm_storeu_si128( ( __m128i* ) ( dst +  8 ), l1 );
+      _mm_storeu_si128( ( __m128i* ) ( dst + 16 ), l2 );
+      _mm_storeu_si16 ( ( __m128i* ) ( dst + 24 ), e );
+    }
+    
+    _mm_storeu_si32 ( ( __m128i* ) ( dst -  2 ), b );
+    _mm_storeu_si128( ( __m128i* ) ( dst      ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst +  8 ), l1 );
+    _mm_storeu_si128( ( __m128i* ) ( dst + 16 ), l2 );
+    _mm_storeu_si16 ( ( __m128i* ) ( dst + 24 ), e );
+
+    dst += dstStride;
+
+    _mm_storeu_si32 ( ( __m128i* ) ( dst -  2 ), b );
+    _mm_storeu_si128( ( __m128i* ) ( dst      ), l0 );
+    _mm_storeu_si128( ( __m128i* ) ( dst +  8 ), l1 );
+    _mm_storeu_si128( ( __m128i* ) ( dst + 16 ), l2 );
+    _mm_storeu_si16 ( ( __m128i* ) ( dst + 24 ), e );
+  }
+  else
+  {
+    // TODO: fix for 444!
+
+    g_pelBufOP.copyBuffer( ( const char* ) src, srcStride * sizeof( Pel ), ( char* ) dst, dstStride * sizeof( Pel ), width * sizeof( Pel ), height );
+
+    /*left and right padding*/
+    Pel* ptrTemp1 = dst;
+    Pel* ptrTemp2 = dst + (width - 1);
+    ptrdiff_t offset = 0;
+    for( int i = 0; i < height; i++ )
+    {
+      offset = dstStride * i;
+      for( int j = 1; j <= padSize; j++ )
+      {
+        *(ptrTemp1 - j + offset) = *(ptrTemp1 + offset);
+        *(ptrTemp2 + j + offset) = *(ptrTemp2 + offset);
+      }
+    }
+    /*Top and Bottom padding*/
+    int numBytes = (width + padSize + padSize) * sizeof( Pel );
+    ptrTemp1 = (dst - padSize);
+    ptrTemp2 = (dst + (dstStride * (height - 1)) - padSize);
+    for( int i = 1; i <= padSize; i++ )
+    {
+      memcpy( ptrTemp1 - (i * dstStride), (ptrTemp1), numBytes );
+      memcpy( ptrTemp2 + (i * dstStride), (ptrTemp2), numBytes );
+    }
+  }
+}
+
+#if ENABLE_SIMD_OPT_BDOF
+template<X86_VEXT vext>
+void InterPredInterpolation::_initInterPredictionX86()
+{
+  xFpBiDirOptFlow     = BiOptFlowCoreSIMD<vext>;
+  xFpBDOFGradFilter   = gradFilter_SSE<vext>;
+  xFpProfGradFilter   = gradFilter_SSE<vext, false>;
+  xFpApplyPROF        = applyPROF_SSE<vext>;
+  xFpPadDmvr          = padDmvr_SSE<vext>;
+#if defined( REAL_TARGET_X86 )   // builds that compile these kernels through SIMDE (Arm) keep their own path
+  xFpAffineLumaCU[0][0] = affineLumaCU_SSE<vext, false, false>;
+  xFpAffineLumaCU[0][1] = affineLumaCU_SSE<vext, false, true>;
+  xFpAffineLumaCU[1][0] = affineLumaCU_SSE<vext, true, false>;
+  xFpAffineLumaCU[1][1] = affineLumaCU_SSE<vext, true, true>;
+#endif
+#if USE_AVX2
+  xFpBDOF16           = BDOF16_AVX2;
+#endif
+}
+template void InterPredInterpolation::_initInterPredictionX86<SIMDX86>();
+
+#endif
+} // namespace vvenc
+
+//! \}
+
+#endif // TARGET_SIMD_X86
+//! \}

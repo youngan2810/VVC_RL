@@ -1,0 +1,33 @@
+name: CPU contracts and native action mechanics
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install torch numpy --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m unittest discover -s tests -v
+      - run: python scripts/build_native.py --jobs 2
+      - name: Build pinned independent decoder
+        run: |
+          git clone https://github.com/fraunhoferhhi/vvdec.git /tmp/vvdec
+          git -C /tmp/vvdec fetch origin 649f0b2fafee977c998d7e4d674f8b88d952e3a3
+          git -C /tmp/vvdec checkout --detach 649f0b2fafee977c998d7e4d674f8b88d952e3a3
+          cmake -S /tmp/vvdec -B /tmp/vvdec/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/vvdec/build --target vvdecapp -j 2
+      - name: Native integration smoke (not a training gate)
+        run: |
+          python -c "import json;from pathlib import Path;p=Path('_build/bin').resolve();Path('_build/toolchain.json').write_text(json.dumps(dict(encoder=str(p/'vvenc_rl'),vanilla=str(p/'vvenc_vanilla'),decoder='/tmp/vvdec/bin/release-static/vvdecapp')))"
+          python -m vvcrl native-smoke --output _build/ci_native_smoke --toolchain _build/toolchain.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-evidence
+          path: |
+            _build/*log
+            _build/ci_native_smoke/**/result.json
+            _build/ci_native_smoke/NATIVE_SMOKE.json

@@ -1,0 +1,490 @@
+/* -----------------------------------------------------------------------------
+The copyright in this software is being made available under the Clear BSD
+License, included below. No patent rights, trademark rights and/or
+other Intellectual Property Rights other than the copyrights concerning
+the Software are granted under this license.
+
+The Clear BSD License
+
+Copyright (c) 2019-2026, Fraunhofer-Gesellschaft zur Förderung der angewandten Forschung e.V. & The VVenC Authors.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted (subject to the limitations in the disclaimer below) provided that
+the following conditions are met:
+
+     * Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+     * Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+
+     * Neither the name of the copyright holder nor the names of its
+     contributors may be used to endorse or promote products derived from this
+     software without specific prior written permission.
+
+NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE GRANTED BY
+THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+
+------------------------------------------------------------------------------------------- */
+
+/** \file     EncAdaptiveLoopFilterX86.h
+ \brief    x86 helpers for adaptive loop filter
+ */
+
+#include "CommonDefX86.h"
+
+#include "../EncAdaptiveLoopFilter.h"
+
+//! \ingroup EncoderLib
+//! \{
+
+#if defined( TARGET_SIMD_X86 ) && ENABLE_SIMD_OPT_ALF
+
+namespace vvenc
+{
+
+#define NL_COVAR_bstride ( MAX_NUM_ALF_LUMA_COEFF << 4 )
+#define NL_COVAR_kstride ( 1 << 4 )
+#define NL_COVAR_xstride ( 1 )
+#define GET_ALF_COVAR( elocal, b, k, x )                                                                               \
+  elocal[( b ) * NL_COVAR_bstride + ( k ) * NL_COVAR_kstride + ( x ) * NL_COVAR_xstride]
+
+template<X86_VEXT vext>
+void simdGetPreBlkStatsWeightedAccum( AlfCovariance& alfCovariance, const AlfFilterShape& shape, const Pel* ELocal,
+                                      const Pel yLocal[4][4], const alf_float_t weight[4][4], const int numBins )
+{
+  for( int b0 = 0; b0 < numBins; b0++ )
+  {
+    for( int k = 0; k < shape.numCoeff; k++ )
+    {
+      const Pel* Elocalk = &GET_ALF_COVAR( ELocal, b0, k, 0 );
+
+      __m128 xprodwk[4];
+      for( int ii = 0; ii < 4; ii++ )
+      {
+        const __m128i xlockx32 = _mm_cvtepi16_epi32( _vv_loadl_epi64( ( const __m128i* )&Elocalk[( ii << 2 )] ) );
+
+        __m128 xlocd = _mm_cvtepi32_ps( xlockx32 );
+        __m128 xwght = _mm_loadu_ps( &weight[ii][0] );
+        __m128 xprdct = _mm_mul_ps( xwght, xlocd );
+        xprodwk[ii] = xprdct;
+      }
+
+      for( int b1 = 0; b1 < numBins; b1++ )
+      {
+        alf_float_t* cov = &alfCovariance.E[b0][b1][k][k];
+
+        for( int l = k; l < shape.numCoeff; l++ )
+        {
+          const Pel* Elocall = &GET_ALF_COVAR( ELocal, b1, l, 0 );
+
+          __m128 xacc = _mm_setzero_ps();
+
+          for( int ii = 0; ii < 4; ii++ )
+          {
+            const __m128i xloclx32 = _mm_cvtepi16_epi32( _vv_loadl_epi64( ( const __m128i* )&Elocall[( ii << 2 )] ) );
+
+            __m128 xlockd = _mm_cvtepi32_ps( xloclx32 );
+            xacc = _mm_add_ps( xacc, _mm_mul_ps( xprodwk[ii], xlockd ) );
+          }
+
+          xacc = _mm_hadd_ps( xacc, xacc );
+          xacc = _mm_hadd_ps( xacc, xacc );
+
+          *cov++ += _mm_cvtss_f32( xacc );
+        }
+      }
+
+      __m128 xacc = _mm_setzero_ps();
+
+      for( int ii = 0; ii < 4; ii++ )
+      {
+        const __m128i yloc32 = _mm_cvtepi16_epi32( _vv_loadl_epi64( ( const __m128i* )&yLocal[ii][0] ) );
+
+        __m128 ylocd = _mm_cvtepi32_ps( yloc32 );
+        __m128 xprdct = _mm_mul_ps( ylocd, xprodwk[ii] );
+
+        xacc = _mm_add_ps( xacc, xprdct );
+      }
+
+      xacc = _mm_hadd_ps( xacc, xacc );
+      xacc = _mm_hadd_ps( xacc, xacc );
+
+      alfCovariance.y[b0][k] += _mm_cvtss_f32( xacc );
+    }
+  }
+
+  __m128 xacc = _mm_setzero_ps();
+
+  for( int ii = 0; ii < 4; ii++ )
+  {
+    const __m128i yloc32 = _mm_cvtepi16_epi32( _vv_loadl_epi64( ( const __m128i* )&yLocal[ii][0] ) );
+
+    __m128 ylocd = _mm_cvtepi32_ps( yloc32 );
+    __m128 xwght = _mm_loadu_ps( &weight[ii][0] );
+    __m128 xprdct = _mm_mul_ps( xwght, _mm_mul_ps( ylocd, ylocd ) );
+
+    xacc = _mm_add_ps( xacc, xprdct );
+  }
+
+  xacc = _mm_hadd_ps( xacc, xacc );
+  xacc = _mm_hadd_ps( xacc, xacc );
+
+  alfCovariance.pixAcc += _mm_cvtss_f32( xacc );
+}
+
+// A row of 16 Pels of ELocal is loaded once and multiplied with many other rows.
+// alfRowDotPartials: its products with the 16 Pels at row, summed pairwise into 4 int32 partial sums of their dot product.
+// alfRowDots4: its dot products with the 4 rows of 16 Pels from rows on, one in each int32.
+// Integer sums don't depend on their order, so both builds give the same values.
+#ifdef USE_AVX2
+typedef __m256i AlfRow;
+
+static inline AlfRow alfLoadRow( const Pel* row )
+{
+  return _mm256_loadu_si256( ( const __m256i* )row );
+}
+
+static inline __m128i alfAddLanes( const __m256i value )
+{
+  return _mm_add_epi32( _mm256_castsi256_si128( value ), _mm256_extracti128_si256( value, 1 ) );
+}
+
+static inline __m128i alfRowDotPartials( const AlfRow rowK, const Pel* row )
+{
+  return alfAddLanes( _mm256_madd_epi16( rowK, alfLoadRow( row ) ) );
+}
+
+static inline __m128i alfRowDots4( const AlfRow rowK, const Pel* rows )
+{
+  const __m256i dot0 = _mm256_madd_epi16( rowK, alfLoadRow( rows + 0 * NL_COVAR_kstride ) );
+  const __m256i dot1 = _mm256_madd_epi16( rowK, alfLoadRow( rows + 1 * NL_COVAR_kstride ) );
+  const __m256i dot2 = _mm256_madd_epi16( rowK, alfLoadRow( rows + 2 * NL_COVAR_kstride ) );
+  const __m256i dot3 = _mm256_madd_epi16( rowK, alfLoadRow( rows + 3 * NL_COVAR_kstride ) );
+  return alfAddLanes( _mm256_hadd_epi32( _mm256_hadd_epi32( dot0, dot1 ), _mm256_hadd_epi32( dot2, dot3 ) ) );
+}
+#else
+struct AlfRow
+{
+  __m128i pels0, pels8;
+};
+
+static inline AlfRow alfLoadRow( const Pel* row )
+{
+  return { _mm_loadu_si128( ( const __m128i* )&row[0] ), _mm_loadu_si128( ( const __m128i* )&row[8] ) };
+}
+
+static inline __m128i alfRowDotPartials( const AlfRow& rowK, const Pel* row )
+{
+  const __m128i mmacc0 = _mm_madd_epi16( rowK.pels0, _mm_loadu_si128( ( const __m128i* )&row[0] ) );
+  const __m128i mmacc8 = _mm_madd_epi16( rowK.pels8, _mm_loadu_si128( ( const __m128i* )&row[8] ) );
+  return _mm_add_epi32( mmacc0, mmacc8 );
+}
+
+static inline __m128i alfRowDots4( const AlfRow& rowK, const Pel* rows )
+{
+  const __m128i dot0 = alfRowDotPartials( rowK, rows + 0 * NL_COVAR_kstride );
+  const __m128i dot1 = alfRowDotPartials( rowK, rows + 1 * NL_COVAR_kstride );
+  const __m128i dot2 = alfRowDotPartials( rowK, rows + 2 * NL_COVAR_kstride );
+  const __m128i dot3 = alfRowDotPartials( rowK, rows + 3 * NL_COVAR_kstride );
+  return _mm_hadd_epi32( _mm_hadd_epi32( dot0, dot1 ), _mm_hadd_epi32( dot2, dot3 ) );
+}
+#endif
+
+// The 2 or 3 cells at the end of covariance row k that the 4-wide steps leave over, in one vector add instead of one
+// scalar add each. dots holds the dot products with the last four rows (numCoeff - 4 .. numCoeff - 1), so its last t lanes
+// belong to the t leftover cells; cov points at cell numCoeff - 4 of the row, which holds 13 floats, so the 16-byte access
+// stays inside it. The other lanes are written back as loaded (blend after the add), so every cell gets exactly the one
+// float add of the scalar path. A single leftover cell keeps the scalar path: one add would not pay for four dots.
+static constexpr int ALF_MIN_VECTOR_TAIL = 2;
+
+static inline __m128 alfTailMask( const int numTailCells )
+{
+  // lane j is selected when j >= 4 - numTailCells
+  return _mm_castsi128_ps( _mm_cmpgt_epi32( _mm_setr_epi32( 0, 1, 2, 3 ), _mm_set1_epi32( 3 - numTailCells ) ) );
+}
+
+static inline void alfAddTailCells( alf_float_t* cov, const __m128 dots, const __m128 tailMask )
+{
+  const __m128 old = _mm_loadu_ps( cov );
+  _mm_storeu_ps( cov, _mm_blendv_ps( old, _mm_add_ps( old, dots ), tailMask ) );
+}
+
+template<X86_VEXT vext>
+void simdGetPreBlkStatsAccum( AlfCovariance& alfCovariance, const AlfFilterShape& shape, const Pel* ELocal,
+                              const Pel yLocal[4][4], const int numBins )
+{
+  for( int b0 = 0; b0 < numBins; b0++ )
+  {
+    for( int k = 0; k < shape.numCoeff; k++ )
+    {
+      const Pel* Elocalk = &GET_ALF_COVAR( ELocal, b0, k, 0 );
+
+      const AlfRow rowK = alfLoadRow( Elocalk );
+
+      const int    numTailCells = ( shape.numCoeff - k ) & 3;
+      const int    tailStart    = shape.numCoeff - 4;
+      const __m128 tailMask     = alfTailMask( numTailCells );
+
+      for( int b1 = 0; b1 < numBins; b1++ )
+      {
+        alf_float_t* cov = &alfCovariance.E[b0][b1][k][k];
+
+        int l = k;
+
+        for( ; l < ( shape.numCoeff - 3 ); l += 4 )
+        {
+          const __m128i mmacc = alfRowDots4( rowK, &GET_ALF_COVAR( ELocal, b1, l, 0 ) );
+
+          __m128 mmaccf = _mm_cvtepi32_ps( mmacc );
+
+          __m128 mcov = _mm_loadu_ps( cov );
+          mcov = _mm_add_ps( mcov, mmaccf );
+          _mm_storeu_ps( cov, mcov );
+
+          cov += 4;
+        }
+
+        if( numTailCells >= ALF_MIN_VECTOR_TAIL )
+        {
+          const __m128 dots = _mm_cvtepi32_ps( alfRowDots4( rowK, &GET_ALF_COVAR( ELocal, b1, tailStart, 0 ) ) );
+          alfAddTailCells( &alfCovariance.E[b0][b1][k][tailStart], dots, tailMask );
+          continue;
+        }
+
+        for( ; l < shape.numCoeff; l++ )
+        {
+          __m128i mmacc = alfRowDotPartials( rowK, &GET_ALF_COVAR( ELocal, b1, l, 0 ) );
+          mmacc = _mm_hadd_epi32( mmacc, mmacc );
+          mmacc = _mm_hadd_epi32( mmacc, mmacc );
+
+          __m128 mmaccf = _mm_cvtepi32_ps( mmacc );
+
+          *cov++ += _mm_cvtss_f32( mmaccf );
+        }
+      }
+
+      __m128i mmacc = alfRowDotPartials( rowK, &yLocal[0][0] );
+      mmacc = _mm_hadd_epi32( mmacc, mmacc );
+      mmacc = _mm_hadd_epi32( mmacc, mmacc );
+
+      alfCovariance.y[b0][k] += _mm_cvtsi128_si32( mmacc );
+    }
+  }
+
+  __m128i mmacc = alfRowDotPartials( alfLoadRow( &yLocal[0][0] ), &yLocal[0][0] );
+  mmacc = _mm_hadd_epi32( mmacc, mmacc );
+  mmacc = _mm_hadd_epi32( mmacc, mmacc );
+
+  alfCovariance.pixAcc += _mm_cvtsi128_si32( mmacc );
+}
+
+// simdGetPreBlkStatsAccum with all clipping bins for a block whose equal bins form the runs of equalBinsMask
+// (AlfEqualBinRuns): each sum is computed once per pair of runs and added, with the same instructions as in
+// simdGetPreBlkStatsAccum, to every cell it stands for, so the result is identical
+template<X86_VEXT vext>
+void simdGetPreBlkStatsAccumEqualBins( AlfCovariance& alfCovariance, const AlfFilterShape& shape, const Pel* ELocal,
+                                       const Pel yLocal[4][4], const int equalBinsMask )
+{
+  const AlfEqualBinRuns runs( equalBinsMask );
+
+  for( int r0 = 0; r0 < runs.numRuns; r0++ )
+  {
+    const int firstBin0 = runs.first[r0], endBin0 = firstBin0 + runs.size[r0];
+
+    for( int k = 0; k < shape.numCoeff; k++ )
+    {
+      const Pel* Elocalk = &GET_ALF_COVAR( ELocal, firstBin0, k, 0 );
+
+      const AlfRow rowK = alfLoadRow( Elocalk );
+
+      const int    numTailCells = ( shape.numCoeff - k ) & 3;
+      const int    tailStart    = shape.numCoeff - 4;
+      const __m128 tailMask     = alfTailMask( numTailCells );
+
+      for( int r1 = 0; r1 < runs.numRuns; r1++ )
+      {
+        const int firstBin1 = runs.first[r1], endBin1 = firstBin1 + runs.size[r1];
+
+        int l = k;
+
+        for( ; l < ( shape.numCoeff - 3 ); l += 4 )
+        {
+          const __m128i mmacc = alfRowDots4( rowK, &GET_ALF_COVAR( ELocal, firstBin1, l, 0 ) );
+
+          const __m128 mmaccf = _mm_cvtepi32_ps( mmacc );
+
+          for( int b0 = firstBin0; b0 < endBin0; b0++ )
+          {
+            for( int b1 = firstBin1; b1 < endBin1; b1++ )
+            {
+              alf_float_t* cov = &alfCovariance.E[b0][b1][k][l];
+              _mm_storeu_ps( cov, _mm_add_ps( _mm_loadu_ps( cov ), mmaccf ) );
+            }
+          }
+        }
+
+        if( numTailCells >= ALF_MIN_VECTOR_TAIL )
+        {
+          const __m128 dots = _mm_cvtepi32_ps( alfRowDots4( rowK, &GET_ALF_COVAR( ELocal, firstBin1, tailStart, 0 ) ) );
+
+          for( int b0 = firstBin0; b0 < endBin0; b0++ )
+          {
+            for( int b1 = firstBin1; b1 < endBin1; b1++ )
+            {
+              alfAddTailCells( &alfCovariance.E[b0][b1][k][tailStart], dots, tailMask );
+            }
+          }
+          continue;
+        }
+
+        for( ; l < shape.numCoeff; l++ )
+        {
+          __m128i mmacc = alfRowDotPartials( rowK, &GET_ALF_COVAR( ELocal, firstBin1, l, 0 ) );
+          mmacc = _mm_hadd_epi32( mmacc, mmacc );
+          mmacc = _mm_hadd_epi32( mmacc, mmacc );
+
+          const float sum = _mm_cvtss_f32( _mm_cvtepi32_ps( mmacc ) );
+
+          for( int b0 = firstBin0; b0 < endBin0; b0++ )
+          {
+            for( int b1 = firstBin1; b1 < endBin1; b1++ )
+            {
+              alfCovariance.E[b0][b1][k][l] += sum;
+            }
+          }
+        }
+      }
+
+      __m128i mmacc = alfRowDotPartials( rowK, &yLocal[0][0] );
+      mmacc = _mm_hadd_epi32( mmacc, mmacc );
+      mmacc = _mm_hadd_epi32( mmacc, mmacc );
+
+      const int sum = _mm_cvtsi128_si32( mmacc );
+
+      for( int b0 = firstBin0; b0 < endBin0; b0++ )
+      {
+        alfCovariance.y[b0][k] += sum;
+      }
+    }
+  }
+
+  __m128i mmacc = alfRowDotPartials( alfLoadRow( &yLocal[0][0] ), &yLocal[0][0] );
+  mmacc = _mm_hadd_epi32( mmacc, mmacc );
+  mmacc = _mm_hadd_epi32( mmacc, mmacc );
+
+  alfCovariance.pixAcc += _mm_cvtsi128_si32( mmacc );
+}
+
+#ifdef USE_AVX2
+// The 4 samples at p of each of 4 rows, gathered row by row into one register.
+static inline __m256i alfLoad4x4( const Pel* p, const ptrdiff_t stride )
+{
+  const __m128i rows01 = _mm_unpacklo_epi64( _mm_loadl_epi64( ( const __m128i* )p ), _mm_loadl_epi64( ( const __m128i* )( p + stride ) ) );
+  const __m128i rows23 = _mm_unpacklo_epi64( _mm_loadl_epi64( ( const __m128i* )( p + 2 * stride ) ), _mm_loadl_epi64( ( const __m128i* )( p + 3 * stride ) ) );
+  return _mm256_inserti128_si256( _mm256_castsi128_si256( rows01 ), rows23, 1 );
+}
+
+// EncAdaptiveLoopFilter::m_getLinBlkInputs: calcLinCovariance4 of the block's 4 rows at once. A filter tap with the
+// sample pair at ( dy, dx ) and ( -dy, -dx ) gives rec[dy][dx] + rec[-dy][-dx] - 2 * rec[0][0] for each of the 16
+// samples, and its 4 rows of 4 values are contiguous in ELocal (NL_COVAR_kstride is 16): with the 4 rows of each sample
+// pair gathered into one register (alfLoad4x4), each tap is one 256-bit add, subtract and store instead of one per row.
+// The values wrap in 16 bits as in the per-row SSE code; the taps follow its order for the transposeIdx, ending with the
+// samples themselves.
+template<int halfFilterLength>
+static void alfLinBlkInputs_AVX2( Pel* ELocal, Pel yLocal[4][4], const Pel* org, const ptrdiff_t orgStride, const Pel* rec, const ptrdiff_t recStride,
+                                  const int transposeIdx )
+{
+  const int     h    = halfFilterLength;
+  const __m256i cur  = alfLoad4x4( rec, recStride );
+  const __m256i cur2 = _mm256_slli_epi16( cur, 1 );
+  _mm256_storeu_si256( ( __m256i* )&yLocal[0][0], _mm256_sub_epi16( alfLoad4x4( org, orgStride ), cur ) );
+
+  Pel* tapValues = ELocal;
+  auto tap = [&]( const int dy, const int dx )
+  {
+    const ptrdiff_t offset = dy * recStride + dx;
+    const __m256i   pair   = _mm256_add_epi16( alfLoad4x4( rec + offset, recStride ), alfLoad4x4( rec - offset, recStride ) );
+    _mm256_storeu_si256( ( __m256i* )tapValues, _mm256_sub_epi16( pair, cur2 ) );
+    tapValues += NL_COVAR_kstride;
+  };
+
+  switch( transposeIdx )
+  {
+  case 0:
+    for( int i = -h; i < 0; i++ ) for( int j = -h - i; j <= h + i; j++ ) tap( i, j );
+    for( int j = -h; j < 0; j++ ) tap( 0, j );
+    break;
+  case 1:
+    for( int j = -h; j < 0; j++ ) for( int i = -h - j; i <= h + j; i++ ) tap( i, j );
+    for( int i = -h; i < 0; i++ ) tap( i, 0 );
+    break;
+  case 2:
+    for( int i = -h; i < 0; i++ ) for( int j = h + i; j >= -h - i; j-- ) tap( i, j );
+    for( int j = -h; j < 0; j++ ) tap( 0, j );
+    break;
+  default:
+    for( int j = -h; j < 0; j++ ) for( int i = h + j; i >= -h - j; i-- ) tap( i, j );
+    for( int i = -h; i < 0; i++ ) tap( i, 0 );
+    break;
+  }
+  _mm256_storeu_si256( ( __m256i* )tapValues, cur );
+}
+
+static void simdGetLinBlkInputs_AVX2( Pel* ELocal, Pel yLocal[4][4], const Pel* org, const int orgStride, const Pel* rec, const int recStride,
+                                      const int halfFilterLength, const int transposeIdx )
+{
+  // the 7x7 luma and 5x5 chroma diamonds
+  if( halfFilterLength == 3 )
+  {
+    alfLinBlkInputs_AVX2<3>( ELocal, yLocal, org, orgStride, rec, recStride, transposeIdx );
+  }
+  else
+  {
+    CHECKD( halfFilterLength != 2, "Unsupported ALF filter length" );
+    alfLinBlkInputs_AVX2<2>( ELocal, yLocal, org, orgStride, rec, recStride, transposeIdx );
+  }
+}
+#endif
+
+template<X86_VEXT vext>
+void EncAdaptiveLoopFilter::_initEncAdaptiveLoopFilter_X86()
+{
+  m_getPreBlkStatsAccum = simdGetPreBlkStatsAccum<vext>;
+  m_getPreBlkStatsWeightedAccum = simdGetPreBlkStatsWeightedAccum<vext>;
+  m_getPreBlkStatsAccumEqualBins = simdGetPreBlkStatsAccumEqualBins<vext>;
+  m_getLinBlkInputs = getLinBlkInputs<true>;
+#ifdef USE_AVX2
+  if( vext >= AVX2 )
+  {
+    m_getLinBlkInputs = simdGetLinBlkInputs_AVX2;
+  }
+#endif
+}
+
+template void EncAdaptiveLoopFilter::_initEncAdaptiveLoopFilter_X86<SIMDX86>();
+
+#undef GET_ALF_COVAR
+#undef NL_COVAR_xstride
+#undef NL_COVAR_kstride
+#undef NL_COVAR_bstride
+
+} // namespace vvenc
+
+#endif // TARGET_SIMD_X86
+
+//! \}
+

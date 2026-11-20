@@ -1,0 +1,11 @@
+VVenC source is vendored at upstream commit 1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f.
+Its Clear BSD license, copyright headers and third-party notices remain in vendor/vvenc.
+See vendor/vvenc/LICENSE.txt and the licenses under vendor/vvenc/thirdparty.
+
+VVdeC v3.2.0 commit 649f0b2fafee977c998d7e4d674f8b88d952e3a3 is an external build dependency.
+YOLOv5 commit 915bbf294bb74c859f0b41f1c23bc395014ea679 and v7.0 YOLOv5n weights are external detector dependencies.
+Their upstream licensing applies; these are not relicensed by this repository.
+
+PyTorch and the Python packages listed in requirements.txt are external dependencies under their respective licenses.
+Dataset videos and pretrained weights are not redistributed here. Locked metadata identifies the user's existing experimental protocol.
+No blanket license is granted here that overrides any upstream licensing or patent terms.

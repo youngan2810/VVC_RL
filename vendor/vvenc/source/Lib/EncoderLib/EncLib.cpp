@@ -1,0 +1,626 @@
+/* -----------------------------------------------------------------------------
+The copyright in this software is being made available under the Clear BSD
+License, included below. No patent rights, trademark rights and/or 
+other Intellectual Property Rights other than the copyrights concerning 
+the Software are granted under this license.
+
+The Clear BSD License
+
+Copyright (c) 2019-2026, Fraunhofer-Gesellschaft zur Förderung der angewandten Forschung e.V. & The VVenC Authors.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted (subject to the limitations in the disclaimer below) provided that
+the following conditions are met:
+
+     * Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+     * Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+
+     * Neither the name of the copyright holder nor the names of its
+     contributors may be used to endorse or promote products derived from this
+     software without specific prior written permission.
+
+NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE GRANTED BY
+THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+
+------------------------------------------------------------------------------------------- */
+
+
+/** \file     EncLib.cpp
+    \brief    encoder class
+*/
+
+#include "EncLib.h"
+#include "CommonLib/Picture.h"
+#include "CommonLib/CommonDef.h"
+#include "CommonLib/TimeProfiler.h"
+#include "CommonLib/Rom.h"
+#include "CommonLib/MCTF.h"
+#include "Utilities/NoMallocThreadPool.h"
+#include "Utilities/MsgLog.h"
+#include "EncStage.h"
+#include "PreProcess.h"
+#include "CuTree.h"
+#include "EncGOP.h"
+#include "CommonLib/x86/CommonDefX86.h"
+
+//! \ingroup EncoderLib
+//! \{
+
+namespace vvenc {
+
+
+// ====================================================================================================================
+// Constructor / destructor / create / destroy
+// ====================================================================================================================
+
+EncLib::EncLib( MsgLog& logger )
+  : msg             ( logger )
+  , m_recYuvBufFunc  ( nullptr )
+  , m_recYuvBufCtx   ( nullptr )
+  , m_encCfg         ()
+  , m_orgCfg         ()
+  , m_firstPassCfg   ()
+  , m_rateCtrl       ( nullptr )
+  , m_preProcess     ( nullptr )
+  , m_MCTF           ( nullptr )
+  , m_cuTree         ( nullptr )
+  , m_preEncoder     ( nullptr )
+  , m_gopEncoder     ( nullptr )
+  , m_threadPool     ( nullptr )
+  , m_picsRcvd       ( 0 )
+  , m_passInitialized( -1 )
+  , m_maxNumPicShared( MAX_INT )
+  , m_accessUnitOutputStarted( false )
+{
+}
+
+EncLib::~EncLib()
+{
+  delete m_rateCtrl;
+  m_rateCtrl = nullptr;
+}
+
+void EncLib::setRecYUVBufferCallback( void* ctx, vvencRecYUVBufferCallback func )
+{
+  m_recYuvBufCtx  = ctx;
+  m_recYuvBufFunc = func;
+  if( m_rateCtrl && m_rateCtrl->rcIsFinalPass && m_gopEncoder )
+  {
+    m_gopEncoder->setRecYUVBufferCallback( m_recYuvBufCtx, m_recYuvBufFunc );
+  }
+}
+
+void EncLib::initEncoderLib( const vvenc_config& encCfg )
+{
+  // copy config parameter
+  const_cast<VVEncCfg&>(m_encCfg) = encCfg;
+
+#if defined( REAL_TARGET_X86 ) && defined( _MSC_VER ) && _MSC_VER >= 1938 && _MSC_VER < 1939
+  if( read_x86_extension_flags() >= x86_simd::AVX2 )
+  {
+    msg.log( VVENC_WARNING, "WARNING: MSVC version 17.8 produces invalid AVX2 code, partially disabling AVX2!\n" );
+  }
+
+#endif
+  // setup modified configs for rate control
+  if( m_encCfg.m_RCNumPasses > 1 || m_encCfg.m_LookAhead )
+  {
+    xInitRCCfg();
+  }
+
+  // initialize pass
+  initPass( 0, nullptr );
+
+#if ENABLE_TRACING
+  g_trace_ctx = tracing_init( m_encCfg.m_traceFile, m_encCfg.m_traceRule, msg );
+  if( g_trace_ctx && m_encCfg.m_listTracingChannels )
+  {
+    std::string sChannelsList;
+    g_trace_ctx->getChannelsList( sChannelsList );
+    msg.log( VVENC_INFO, "\n Using tracing channels:\n\n%s\n", sChannelsList.c_str() );
+  }
+#endif
+
+#if ENABLE_TIME_PROFILING
+  if( g_timeProfiler )
+  {
+    delete g_timeProfiler;
+  }
+  g_timeProfiler = timeProfilerCreate( encCfg );
+#endif
+}
+
+void EncLib::uninitEncoderLib()
+{
+#if ENABLE_TRACING
+  if( g_trace_ctx )
+  {
+    tracing_uninit( g_trace_ctx );
+  }
+#endif
+
+#if ENABLE_CU_MODE_COUNTERS
+  std::cout << std::endl;
+  std::cout << "CU Modes statistic across picture types and temporal levels (0:Intra, >0:Inter, luma only)" << std::endl;
+  for( size_t j = 0; j < g_cuCounters1D.getNumCntTypes(); j++ )
+  {
+    for( size_t i = 0; i < g_cuCounters1D.getDimHor() - 1; i++ )
+    {
+      g_cuCounters1D[j][0][g_cuCounters1D.getDimHor() - 1] += g_cuCounters1D[j][0][i];
+    }
+  }
+  StatCounters::report2D( std::cout, g_cuCounters1D, false, true, false, true, true, CU_MODES_TESTED );
+
+  std::cout << std::endl;
+  std::cout << "CU Modes statistic across block-shapes (Non-I-Slices, luma only)" << std::endl;
+  StatCounters::report2D( std::cout, g_cuCounters2D, true, true, false, true, true, CU_MODES_TESTED );
+#endif
+
+#if ENABLE_TIME_PROFILING
+#if ENABLE_TIME_PROFILING_MT_MODE
+  if( m_threadPool )
+  {
+    for(auto& p : m_threadPool->getProfilers())
+    {
+      *g_timeProfiler += *p;
+    }
+  }
+#endif
+  timeProfilerResults( g_timeProfiler );
+  delete g_timeProfiler;
+  g_timeProfiler = nullptr;
+#endif
+  xUninitLib();
+}
+
+void EncLib::initPass( int pass, const char* statsFName )
+{
+  CHECK( m_passInitialized != pass && m_passInitialized + 1 != pass, "initialization of passes only in successive order possible" );
+
+  if( m_rateCtrl == nullptr )
+  {
+    m_rateCtrl = new RateCtrl(msg);
+  }
+
+  m_rateCtrl->setRCPass( m_encCfg, pass, statsFName );
+
+  if( m_passInitialized + 1 != pass )
+  {
+    return;
+  }
+
+  // reset
+  xUninitLib();
+
+  // enable encoder config based on rate control pass
+  if( m_encCfg.m_RCNumPasses > 1 || ( m_encCfg.m_LookAhead && m_orgCfg.m_RCTargetBitrate > 0 ) )
+  {
+    if( !m_rateCtrl->rcIsFinalPass )
+    {
+      // set encoder config for 1st rate control pass
+      const_cast<VVEncCfg&>(m_encCfg) = m_firstPassCfg;
+    }
+    else
+    {
+      // restore encoder config for final 2nd RC pass
+      const_cast<VVEncCfg&>(m_encCfg) = m_orgCfg;
+      m_rateCtrl->init( m_encCfg );
+      const_cast<VVEncCfg&>(m_encCfg).m_QP = m_rateCtrl->getBaseQP();
+    }
+    if( m_encCfg.m_RCTargetBitrate > 0 && !m_encCfg.m_LookAhead )
+    {
+      m_rateCtrl->processFirstPassData( false );
+    }
+  }
+  else if( m_encCfg.m_usePerceptQPA && m_encCfg.m_LookAhead )
+  {
+    m_rateCtrl->init( m_encCfg );
+  }
+
+  // thread pool
+  if( m_encCfg.m_numThreads > 0 )
+  {
+    m_threadPool = new NoMallocThreadPool( m_encCfg.m_numThreads, "EncSliceThreadPool", &m_encCfg );
+  }
+  m_maxNumPicShared = 0;
+
+  // pre processing
+  m_preProcess = new PreProcess( msg );
+  m_preProcess->initStage( m_encCfg, 1, -m_encCfg.m_leadFrames, true, true, false );
+  m_preProcess->init( m_encCfg, m_rateCtrl->rcIsFinalPass );
+  m_encStages.push_back( m_preProcess );
+  m_maxNumPicShared += 1;
+
+  // MCTF
+  if( m_encCfg.m_vvencMCTF.MCTF || m_encCfg.m_usePerceptQPA )
+  {
+    m_MCTF = new MCTF();
+    const int leadFrames   = std::min( VVENC_MCTF_RANGE, m_encCfg.m_leadFrames );
+    const int minQueueSize = m_encCfg.m_vvencMCTF.MCTFFutureReference ? ( leadFrames + 1 + VVENC_MCTF_RANGE ) : ( leadFrames + 1 );
+    m_MCTF->initStage( m_encCfg, minQueueSize, -leadFrames, true, true, false );
+    m_MCTF->init( m_encCfg, m_rateCtrl->rcIsFinalPass, m_threadPool );
+    m_encStages.push_back( m_MCTF );
+    m_maxNumPicShared += minQueueSize - leadFrames;
+  }
+
+  // CU-tree look-ahead, holds the pictures of a GOP until the next GOP has arrived
+  if( m_encCfg.useCuTree() )
+  {
+    m_cuTree = new CuTree();
+    m_cuTree->initStage( m_encCfg, 1, 0, false, true, false );
+    m_cuTree->init( m_encCfg, m_threadPool );
+    m_encStages.push_back( m_cuTree );
+    // a GOP and its look-ahead wait here, while the GOP encoder holds the previous GOP
+    m_maxNumPicShared += m_encCfg.m_GOPSize + CuTree::getNumLookAheadPics( m_encCfg );
+  }
+
+  // pre analysis encoder
+  if( m_encCfg.m_LookAhead )
+  {
+    m_preEncoder = new EncGOP( msg );
+    const int minQueueSize = m_firstPassCfg.m_GOPSize + 1;
+    m_preEncoder->initStage( m_firstPassCfg, minQueueSize, 0, false, false, false );
+    m_preEncoder->init( m_firstPassCfg, m_preProcess->getGOPCfg(), *m_rateCtrl, m_threadPool, true );
+    m_encStages.push_back( m_preEncoder );
+    m_maxNumPicShared += minQueueSize;
+  }
+
+  // gop encoder
+  m_gopEncoder = new EncGOP( msg );
+  const int minQueueSize = m_encCfg.m_GOPSize + 1;
+  m_gopEncoder->initStage( m_encCfg, minQueueSize, 0, false, false, m_encCfg.m_stageParallelProc );
+  m_gopEncoder->init( m_encCfg, m_preProcess->getGOPCfg(), *m_rateCtrl, m_threadPool, false );
+  m_encStages.push_back( m_gopEncoder );
+  m_maxNumPicShared += minQueueSize;
+  // the stages that wait for their own pool tasks start the GOP encoder's ready pictures meanwhile
+  if( m_encCfg.m_stageParallelProc )
+  {
+    if( m_MCTF )   m_MCTF  ->setStartStage( m_gopEncoder );
+    if( m_cuTree ) m_cuTree->setStartStage( m_gopEncoder );
+  }
+
+  // additional pictures due to structural delay
+  m_maxNumPicShared += m_preProcess->getGOPCfg()->getNumReorderPics()[ m_encCfg.m_maxTLayer ];
+  m_maxNumPicShared += 3;
+  // increase number of picture buffers for GOP parallel processing (with IFP), or read GOPs ahead
+  // so that frame parallel encoding can start pictures of later GOPs early (without IFP)
+  m_maxNumPicShared += m_encCfg.m_numParallelGOPs ? (m_encCfg.m_GOPSize + 1) * m_encCfg.m_numParallelGOPs: 0;
+
+  if( m_rateCtrl->rcIsFinalPass )
+  {
+    m_gopEncoder->setRecYUVBufferCallback( m_recYuvBufCtx, m_recYuvBufFunc );
+  }
+
+  // link encoder stages
+  for( int i = 0; i < (int)m_encStages.size() - 1; i++ )
+  {
+    m_encStages[ i ]->linkNextStage( m_encStages[ i + 1 ] );
+  }
+
+  m_picsRcvd                = -m_encCfg.m_leadFrames;
+  m_accessUnitOutputStarted = false;
+  m_passInitialized         = pass;
+}
+
+void EncLib::xUninitLib()
+{
+  // make sure all processing threads are stopped before releasing data
+  if( m_threadPool )
+  {
+    m_threadPool->shutdown( true );
+    // A task that makes other tasks ready mid-run without signalProgress() shows up here instead of only as a slowdown.
+    // Not always an error: a wake-up delayed past the safety interval by preemption of the producer counts as well.
+    if( m_threadPool->numWakeUpsMissed() != 0 )
+    {
+      msg.log( VVENC_INFO, "Thread pool: %u wake-ups caught by the safety interval\n", m_threadPool->numWakeUpsMissed() );
+    }
+  }
+
+  // sub modules
+  if( m_rateCtrl != nullptr )
+  {
+    m_rateCtrl->destroy();
+  }
+  if( m_preProcess )
+  {
+    delete m_preProcess;
+    m_preProcess = nullptr;
+  }
+  if( m_MCTF )
+  {
+    delete m_MCTF;
+    m_MCTF = nullptr;
+  }
+  if( m_cuTree )
+  {
+    delete m_cuTree;
+    m_cuTree = nullptr;
+  }
+  if( m_preEncoder )
+  {
+    delete m_preEncoder;
+    m_preEncoder = nullptr;
+  }
+  if( m_gopEncoder )
+  {
+    delete m_gopEncoder;
+    m_gopEncoder = nullptr;
+  }
+  m_encStages.clear();
+
+  for( auto picShared : m_picSharedList )
+  {
+    delete picShared;
+  }
+  m_picSharedList.clear();
+
+  // thread pool
+  if( m_threadPool )
+  {
+    delete m_threadPool;
+    m_threadPool = nullptr;
+  }
+}
+
+void EncLib::xInitRCCfg()
+{
+  // backup original configuration
+  const_cast<VVEncCfg&>(m_orgCfg) = m_encCfg;
+
+  // initialize first pass configuration
+  m_firstPassCfg = m_encCfg;
+  vvenc_init_preset( &m_firstPassCfg, vvencPresetMode::VVENC_FIRSTPASS );
+
+  // fixed-QP encoding in first rate control pass
+  m_firstPassCfg.m_RCTargetBitrate = 0;
+  if( m_firstPassCfg.m_FirstPassMode > 2 )
+  {
+    m_firstPassCfg.m_SourceWidth  = ( m_encCfg.m_SourceWidth  >> 1 ) & ( ~7 );
+    m_firstPassCfg.m_SourceHeight = ( m_encCfg.m_SourceHeight >> 1 ) & ( ~7 );
+    m_firstPassCfg.m_PadSourceWidth  = m_firstPassCfg.m_SourceWidth;
+    m_firstPassCfg.m_PadSourceHeight = m_firstPassCfg.m_SourceHeight;
+#if TILES_IFP_2PRC_HOTFIX
+    if( m_firstPassCfg.m_ifp && (m_firstPassCfg.m_numTileCols > 1 || m_firstPassCfg.m_numTileRows > 1) )
+    {
+      // due to sub-sampling, expected different tile configuration in cfg (m_tileRowHeight[], m_tileColumnWidth[])
+      // currently, disable auto tiles for the first pass
+      m_firstPassCfg.m_numTileCols = 1;
+      m_firstPassCfg.m_numTileRows = 1;
+      m_firstPassCfg.m_picPartitionFlag = false;
+    }
+#endif
+  }
+
+  // preserve some settings
+  m_firstPassCfg.m_intraQPOffset   = m_encCfg.m_intraQPOffset;
+  m_firstPassCfg.m_GOPQPA          = m_encCfg.m_GOPQPA;
+  if( m_firstPassCfg.m_usePerceptQPA && ( m_firstPassCfg.m_QP <= MAX_QP_PERCEPT_QPA || m_firstPassCfg.m_framesToBeEncoded == 1 ) )
+  {
+    m_firstPassCfg.m_CTUSize       = m_encCfg.m_CTUSize;
+  }
+  m_firstPassCfg.m_vvencMCTF.MCTF  = m_encCfg.m_vvencMCTF.MCTF;
+  // the first pass measures the rates with the final pass's block importance mapping; the firstpass preset also
+  // leaves the CU-tree block size of the final pass
+  m_firstPassCfg.m_blockImportanceMapping = m_encCfg.m_blockImportanceMapping;
+  m_firstPassCfg.m_IBCMode         = m_encCfg.m_IBCMode;
+  m_firstPassCfg.m_bimCtuSize      = m_encCfg.m_CTUSize;
+  m_firstPassCfg.m_log2MinCodingBlockSize = m_encCfg.m_log2MinCodingBlockSize;
+
+  // set Inter block size
+  if( m_firstPassCfg.m_FirstPassMode > 0 )
+  {
+    m_firstPassCfg.m_MinQT[ 1 ] = m_firstPassCfg.m_MaxQT[ 1 ] = ( std::min( m_firstPassCfg.m_SourceWidth, m_firstPassCfg.m_SourceHeight ) < 720 ? 32 : 64 );
+  }
+
+  // clear MaxCuDQPSubdiv
+  if( m_firstPassCfg.m_CTUSize < 128 && std::min( m_firstPassCfg.m_SourceWidth, m_firstPassCfg.m_SourceHeight ) >= 720 )
+  {
+    m_firstPassCfg.m_cuQpDeltaSubdiv = 0;
+  }
+}
+
+// ====================================================================================================================
+// Public member functions
+// ====================================================================================================================
+
+// The current I/O work flow consists of three main parts:
+//   1. At the beginning, the encoder can consume input YUV buffers without an output.
+//   2. After the first encoded picture/access unit is output, on each next call: one yuv-buffer IN / one encoded access unit (AU) OUT.
+//      Hence, in stage-parallel mode, we must wait until next encoded picture (AU) is going to be output,
+//      unless nothing can progress without more input (then the call returns a buffered AU; none only when the buffer has run dry)
+//   3. When no more input is available, the top level goes into flushing mode: nullptr IN / one encoded access unit (AU) OUT. 
+//      The encoder flushes the encoded AUs until the queues are empty.
+
+void EncLib::encodePicture( bool flush, const vvencYUVBuffer* yuvInBuf, AccessUnitList& au, bool& isQueueEmpty )
+{
+  PROFILER_ACCUM_AND_START_NEW_SET( 1, g_timeProfiler, P_TOP_LEVEL );
+
+  CHECK( yuvInBuf == nullptr && ! flush, "no input picture given" );
+
+  // clear output access unit
+  au.clearAu();
+
+  // NOTE regarding the stage parallel processing
+  // The next input yuv-buffer must be passed to the encoding process (1.Stage).
+  // The following should be considered:
+  //   1. The final stage is non-blocking, so it doesn't wait until picture is reconstructed.
+  //   2. Generally, the stages have different throughput; last stage is the slowest.
+  //   3. The number of picture-units required for the input yuv-buffers is limited.
+  //   4. Due to chunk-mode and non-blockiness, it's possible that we can run out of picture-units.
+  //   5. Then we have to wait for the next available picture-unit, so the input frame can be passed to the 1.stage.
+
+  // CU-tree passes its pictures on a GOP at a time, and the GOP encoder only starts with a GOP and one picture queued.
+  // When the intra period cuts a GOP short, the GOP encoder waits for CU-tree's next batch, at most a GOP of input.
+  // A buffer of that many access units covers the wait, so that every call, once the output has started, takes its
+  // input picture and returns one access unit: with CU-tree the output starts once more than GOP + 1 access units
+  // (and never fewer than the usual 4) are queued, in both modes. Without stage parallel processing the loop also
+  // refills the buffer before it returns; with it the loop only waits while no access unit is buffered, so the stages
+  // keep running in parallel with the input.
+  const size_t cuTreeBuffer = m_encCfg.useCuTree() ? m_encCfg.m_GOPSize + 1 : 0;
+  const size_t outputDelay  = m_encCfg.useCuTree() ? std::max<size_t>( cuTreeBuffer, 4 ) : ( m_encCfg.m_stageParallelProc ? 4 : 0 );
+  const size_t auBuffer     = m_encCfg.m_stageParallelProc ? 0 : cuTreeBuffer;
+
+  PicShared* picShared = nullptr;
+  bool inputPending    = ( yuvInBuf != nullptr );
+  bool stalledBefore   = false;
+  while( true )
+  {
+    // send new YUV input buffer to first encoder stage
+    if( inputPending )
+    {
+      picShared = xGetFreePicShared();
+      if( picShared )
+      {
+        picShared->reuse( m_picsRcvd, yuvInBuf );
+        m_encStages[ 0 ]->addPicSorted( picShared, flush );
+        m_picsRcvd  += 1;
+        inputPending = false;
+      }
+    }
+
+    PROFILER_EXT_UPDATE( g_timeProfiler, P_TOP_LEVEL, 0 );
+
+    // trigger stages
+    isQueueEmpty = m_picsRcvd > 0 || ( m_picsRcvd <= 0 && flush );
+    bool progress = false;
+    for( auto encStage : m_encStages )
+    {
+      progress     |= encStage->runStage( flush, au );
+      isQueueEmpty &= encStage->isStageDone();
+    }
+
+    if( !au.empty() )
+    {
+      m_AuList.push_back( au );
+
+      au.detachNalUnitList();
+      au.clearAu();
+      // NOTE: delay AU output in stage parallel mode, and by the CU-tree buffer
+      if( !m_accessUnitOutputStarted )
+        m_accessUnitOutputStarted = m_AuList.size() > outputDelay || flush;
+    }
+
+    // wait if input picture hasn't been stored yet or if encoding is running and no new output access unit has been encoded
+    // (or, with the CU-tree buffer, until the buffer is full again)
+    bool waitAndStay = inputPending || ( m_rateCtrl->rcIsFinalPass && m_AuList.size() <= auBuffer && ! isQueueEmpty && ( m_accessUnitOutputStarted || flush ) );
+    if( ! waitAndStay )
+    {
+      break;
+    }
+    // With the CU-tree buffer (no stage parallel processing), nothing changes until a stage passes a picture on:
+    // return for more input rather than wait for an access unit that cannot come.
+    if( auBuffer && ! inputPending && ! progress )
+    {
+      break;
+    }
+
+    if( m_encCfg.m_stageParallelProc )
+    {
+      bool picInCoding = false;
+      for( auto encStage : m_encStages )
+      {
+        if( encStage->isNonBlocking() )
+          picInCoding |= encStage->waitForFreeEncoders();
+      }
+      // With no picture in coding, no stage passing a picture on and the input taken, nothing changes until more
+      // input arrives: the GOP encoder waits for a GOP and one picture, which CU-tree passes on only with its
+      // look-ahead. Return for more input rather than wait for an access unit that cannot come: a buffered one if
+      // there is one (the CU-tree buffer above), none only as the fallback when the buffer has run dry. The second
+      // such pass in a row decides, so that a picture finished after the GOP encoder looked at it is collected first.
+      const bool stalled = ! picInCoding && ! progress && ! inputPending && ! flush;
+      if( stalled && stalledBefore )
+      {
+        break;
+      }
+      stalledBefore = stalled;
+    }
+  }
+
+  // check if we have an AU to output
+  if( !m_AuList.empty() && m_accessUnitOutputStarted )
+  {
+    au = m_AuList.front();
+    m_AuList.front().detachNalUnitList();
+    m_AuList.pop_front();
+  }
+
+  // reset output access unit, if not final pass
+  if( ! m_rateCtrl->rcIsFinalPass )
+  {
+    au.clearAu();
+  }
+
+  // finally, ensure that the whole queue is empty
+  isQueueEmpty &= m_AuList.empty();
+}
+
+void EncLib::printSummary()
+{
+  if( m_gopEncoder )
+  {
+    m_gopEncoder->printOutSummary( m_encCfg.m_printMSEBasedSequencePSNR, m_encCfg.m_printSequenceMSE, m_encCfg.m_printHexPsnr );
+  }
+}
+
+void EncLib::getParameterSets( AccessUnitList& au )
+{
+  if( m_gopEncoder )
+  {
+    m_gopEncoder->getParameterSets( au );
+  }
+}
+
+int EncLib::getCurPass() const
+{
+  return m_passInitialized;
+}
+
+// ====================================================================================================================
+// Protected member functions
+// ====================================================================================================================
+
+PicShared* EncLib::xGetFreePicShared()
+{
+  PicShared* picShared = nullptr;
+  for( auto itr : m_picSharedList )
+  {
+    if( ! itr->isUsed() )
+    {
+      picShared = itr;
+      break;
+    }
+  }
+
+  if( ! picShared )
+  {
+    if( m_encCfg.m_stageParallelProc && ( m_picSharedList.size() >= m_maxNumPicShared ) )
+      return nullptr;
+
+    picShared = new PicShared();
+    picShared->create( m_encCfg.m_framesToBeEncoded, m_encCfg.m_internChromaFormat, Size( m_encCfg.m_PadSourceWidth, m_encCfg.m_PadSourceHeight ), m_encCfg.m_vvencMCTF.MCTF || m_encCfg.m_usePerceptQPA );
+    m_picSharedList.push_back( picShared );
+  }
+  CHECK( picShared == nullptr, "out of memory" );
+
+  return picShared;
+}
+
+} // namespace vvenc
+
+//! \}

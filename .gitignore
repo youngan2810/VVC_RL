@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+_build/
+_deps/
+*.pt
+*.yuv
+*.266
+*.bin
+*.zip
+vendor/vvenc/bin/
+vendor/vvenc/lib/
+vendor/vvenc/build/
+download_blobs_*.json
+decoder_blobs_*.json
+needed_*.json
+hydrate_failures.json
+publish_*.json
