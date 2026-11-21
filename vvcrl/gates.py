@@ -3,7 +3,7 @@ from pathlib import Path
 import json,platform
 import numpy as np
 import torch
-from .config import SCHEMA,TASK,PPOConfig,atomic_json,canonical,digest,fingerprint
+from .config import SCHEMA,TASK,PPOConfig,RewardConfig,atomic_json,canonical,digest,fingerprint
 from .data import DETECTOR_ID
 
 MANDATORY=('unit_contracts','rgb_protocol','native_noop_parity','all_five_integer_bins','spatial_mapping','actor_to_encoder',
@@ -11,8 +11,9 @@ MANDATORY=('unit_contracts','rgb_protocol','native_noop_parity','all_five_intege
  'logprob_value_replay','actor_head_updated','critic_head_updated','reward_identity','validation_no_update','checkpoint_reload')
 
 def environment():return {'python':platform.python_version(),'torch':str(torch.__version__),'numpy':np.__version__}
-def binding(root,toolchain,profile,workers=2):
-    return {'schema':SCHEMA,'task':TASK,'source_sha256':fingerprint(root),'profile':asdict(profile),'ppo':asdict(PPOConfig()),'detector':DETECTOR_ID,
+def binding(root,toolchain,profile,workers=2,reward_config=RewardConfig()):
+    reward_config.validate()
+    return {'schema':SCHEMA,'task':TASK,'source_sha256':fingerprint(root),'profile':asdict(profile),'ppo':asdict(PPOConfig()),'reward':asdict(reward_config),'detector':DETECTOR_ID,
       'binary_sha256':{k:digest(toolchain[k]) for k in ('encoder','vanilla','decoder')},'workers':workers,'environment':environment()}
 def write_gate(folder,bind,checks,evidence):
     folder=Path(folder)

@@ -2,18 +2,19 @@ from dataclasses import asdict
 from pathlib import Path
 import hashlib,json,time,shutil,gzip
 import numpy as np
-from .config import FB,W,H,DELTAS,TASK,atomic_json,digest,canonical
+from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical
 from .engine import NativeProcess,verify_decode,audit_trace
 from .state import StateBuilder
 from .metrics import task,summary
-from .reward import reward
+from .reward import reward,clip_objective
 from .model import model_hash
 
 def cache_identity(source,profile,rate,encoder,detector_identity,boxes):
     teacher_sha=hashlib.sha256(canonical(boxes).encode()).hexdigest()
     return {'source_pixel_sha256':digest(source),'source_teacher_sha256':teacher_sha,'profile':asdict(profile),'rate':rate,'encoder_sha256':digest(encoder),'detector':detector_identity,'task':TASK}
 
-def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True):
+def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=RewardConfig()):
+    reward_config.validate()
     if split not in ('train','val'):raise ValueError('This research runner does not select from Test')
     if not verify:raise ValueError('Independent decoder verification cannot be disabled')
     identity=cache_identity(source,profile,rate,encoder,detector_identity,boxes)
@@ -34,7 +35,9 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
             timing['decision']+=time.perf_counter()-started;started=time.perf_counter();outcome,recon=proc.step(delta);timing['encode_handshake']+=time.perf_counter()-started
             started=time.perf_counter();yuv8=np.minimum(255,(recon.astype(np.uint32)+2)>>2).astype(np.uint8);pred=detector(yuv8);timing['decoded_detector']+=time.perf_counter()-started;metrics=task(boxes[poc],pred)
             baseline=anchor['by_poc'][str(poc)] if anchor is not None else {'score':metrics['score'],'bits':outcome['bits']}
-            rew=reward(metrics['score'],baseline['score'],outcome['bits'],baseline['bits'],profile.frames,state.budget,price)
+            rew=reward(metrics['score'],baseline['score'],outcome['bits'],baseline['bits'],profile.frames,state.budget,price,config=reward_config,terminal=k==profile.frames-1,
+              total_bits=outcome['bits_total'] if k==profile.frames-1 else None,
+              anchor_total_bits=(anchor['bits'] if anchor is not None else outcome['bits_total']) if k==profile.frames-1 else None)
             ref=state.raw[poc,:W*H].astype(np.float64)*4;mse=float(np.mean((recon[:W*H].astype(np.float64)-ref)**2))
             record={k:metrics[k] for k in ('score','legacy_f1','tp','fp','fn')}
             record.update(k=k,poc=poc,bits=outcome['bits'],bits_total=outcome['bits_total'],reward=rew,
@@ -61,9 +64,13 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
           psnr_y_10bit=10*np.log10(1023**2/max(np.mean([r['mse_y_10bit'] for r in records]),1e-30)))
         # Mechanical accounting identity, not a claim of learned usefulness.
         raw=sum(r['reward']['raw'] for r in records)
-        expected=0. if anchor is None else result['task_retention_f1_v2']-anchor['task_retention_f1_v2']-price*(result['bits']-anchor['bits'])/state.budget
+        objective=clip_objective(result['task_retention_f1_v2'],result['anchor_quality'],result['bits'],result['anchor_bits'],state.budget,price,reward_config)
+        expected=objective['raw']
+        result.update(reward_config=asdict(reward_config),reward_price=price,clip_objective=objective)
         if not np.isclose(raw,expected,atol=1e-10):raise ValueError('Reward sum does not equal clip objective')
         result['raw_return']=raw;result['reward_identity_error']=abs(raw-expected)
+        result['terminal_rate_penalty_count']=sum(r['reward']['bit_component']!=0 for r in records) if reward_config.version=='task-budget-v2' else None
+        if reward_config.version=='task-budget-v2' and any(r['reward']['bit_component']!=0 for r in records[:-1]):raise ValueError('V2 bitrate penalty must occur only at the final coding step')
         if model is not None and model_hash(model)!=before:raise ValueError('Collection/validation changed model weights')
         folder=Path(folder);atomic_json(folder/'frames.json',records);atomic_json(folder/'result.json',result)
         packed={k:np.asarray(v) for k,v in batch.items()};np.savez_compressed(folder/'rollout.npz',**packed)

@@ -12,7 +12,10 @@ def verify(root=ROOT):
         for node in tree.body:
             if isinstance(node,ast.Assign):
                 for target in node.targets:
-                    if isinstance(target,ast.Name) and target.id in ('EXPECTED_SOURCE_SHA256','RUN_MINI_TRAINING'):assignments[target.id]=ast.literal_eval(node.value)
+                    if isinstance(target,ast.Name) and target.id in ('EXPECTED_SOURCE_SHA256','RUN_MINI_TRAINING','SOURCE_COMMIT','REWARD_VERSION'):assignments[target.id]=ast.literal_eval(node.value)
+    commit=assignments.get('SOURCE_COMMIT','')
+    if len(commit)!=40 or any(c not in '0123456789abcdef' for c in commit):raise ValueError('Notebook requires an exact source commit')
+    if assignments.get('REWARD_VERSION')!='task-budget-v2':raise ValueError('Current notebook must default to V2 reward')
     actual=fingerprint(root)
     if assignments.get('EXPECTED_SOURCE_SHA256')!=actual:raise ValueError('Published notebook pin differs from this host source fingerprint')
     if assignments.get('RUN_MINI_TRAINING') is not False:raise ValueError('Distributed notebook must default to preflight only')

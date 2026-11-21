@@ -1,3 +1,55 @@
+CURRENT REVISION: TASK-BUDGET V2 (2026-11-21)
+
+Scope: reward-only learning experiment after the reviewed frozen V1 check.
+Keep StateBuilder (8 spatial / 15 global), ActorCritic, PPO-Clip, GAE,
+Multi-Categorical {-2,-1,0,1,2}, Auxiliary and native encoder hooks unchanged.
+Keep the locked mini split 16 Train / 4 Validation, 256-frame windows, rates,
+seed, 40-update budget and optimizer hyperparameters for the first A/B run.
+
+Q = mean per-frame detection retention F1; Q0 = paired QPA/no-op value.
+C = target bitrate * clip duration; B/B0 = actual Annex-B bits of policy/QPA.
+cap = (1+tolerance)*min(C,B0); tolerance=0.02 by default, 0 for a strict cap.
+J_V2 = (Q-Q0) - lambda*max(0,(B-cap)/C).
+There is NO bit-saving bonus below cap. Reducing F1 cannot produce a positive
+V2 return merely by saving bitrate. More F1 above cap can still give a positive
+soft objective, so checkpoint selection independently requires budget feasibility.
+
+Dense reward: (F1_frame-F1_QPA_frame)/N for each coding step.
+Terminal reward: subtract lambda*max(0,(B-cap)/C) exactly ONCE at k=N-1,
+not at POC=N-1 (VVC coding order differs from display order).
+Actual cumulative AU bits are used and then checked against the completed file.
+Sum raw rewards must equal J_V2; sum PPO rewards is 100*J_V2.
+Gamma=1 and GAE lambda=0.95 remain unchanged. Terminal credit can be attenuated
+by GAE for earlier decisions; do not present this change as solving credit
+assignment or guaranteeing useful learning. That is a later isolated ablation.
+
+Price begins at 1 per rate; eta=0.05, bound [0,10] unchanged.
+Update only after complete Train clips using mean((B-cap)/C), not Validation.
+Price is fixed during each clip; state receives the same price feature as V1.
+Paired baseline totals are reward/validation metadata, not current-state inputs.
+The native RC has unchanged target bitrate; the cap is not an encoder override.
+
+Validation: four locked videos x rates 50/120/200, deterministic argmax.
+Best checkpoint requires complete unique pairs, positive macro Q-Q0 and all
+clips within cap. Save per-clip regressions, entropy and requested/effective maps.
+Argmax is the primary deployment mode; never pick a favorable sampling seed.
+Compare QPA, uniform +/-2, ROI controls, random and frozen V1 before full runs.
+ROI's extra bits must be reported; a 2% cap is not exact rate matching or BD-rate.
+
+Compatibility: checkpoint /2 and experiment binding include reward config.
+Do NOT resume the old V1 optimizer into V2. Keep its original export as control.
+V2 mini starts from the same seed/initialization, with its own full preflight.
+paired-linear-v1 is retained as an explicit fresh A/B formula, not default.
+No GPU BDD100K V2 training result has been obtained locally.
+
+The specification below is the historical V1 design. Its reward equations,
+old implementation-status statements and budget-price target are superseded
+by the V2 section above. State/action/native design is retained.
+
+==========================================================================
+HISTORICAL V1 SPECIFICATION
+==========================================================================
+
 ĐẶC TẢ NGHIÊN CỨU STATE – ACTION – REWARD, V1
 Ngày: 20/11/2026
 Trạng thái: đặc tả trước triển khai, chưa build Agent, chưa training

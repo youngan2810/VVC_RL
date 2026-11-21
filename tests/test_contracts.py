@@ -2,7 +2,7 @@ import io,json,tempfile,unittest,zipfile,subprocess,os
 from pathlib import Path
 import numpy as np
 import torch
-from vvcrl.config import Profile,PPOConfig,FB,canonical,digest,fingerprint
+from vvcrl.config import Profile,PPOConfig,RewardConfig,FB,canonical,digest,fingerprint
 from vvcrl.state import StateBuilder,areas,pool
 from vvcrl.model import ActorCritic,model_hash
 from vvcrl.ppo import PPO,gae
@@ -106,10 +106,10 @@ class RewardTests(unittest.TestCase):
     def test_auxiliary_centers_and_empty_mask(self):
         r=task([[260,140,300,180,.8]],[]);self.assertEqual(r['aux_weight'][1,2],1);self.assertEqual(r['aux_weight'].sum(),1);self.assertEqual(r['aux_target'].sum(),0)
     def test_reward_telescope(self):
-        rows=[reward(.8,.7,1000,950,32,128000,2) for _ in range(32)]
+        rows=[reward(.8,.7,1000,950,32,128000,2,config=RewardConfig("paired-linear-v1")) for _ in range(32)]
         self.assertAlmostEqual(sum(r['raw'] for r in rows),.1-2*1600/128000)
     def test_rate_price_moves_with_budget(self):
-        p=RatePrices();p.update([dict(rate=120,bits=200,budget=100)]);self.assertAlmostEqual(p.values['120'],1.05)
+        p=RatePrices();p.update([dict(rate=120,bits=200,budget=100,anchor_bits=100/1.02)]);self.assertAlmostEqual(p.values['120'],1.05)
     def test_validation_cannot_change_prices(self):
         with self.assertRaises(ValueError):RatePrices().update([],training=False)
     def test_noop_reward_exact_zero(self):self.assertEqual(reward(.2,.2,800,800,32,128000,1)['raw'],0)

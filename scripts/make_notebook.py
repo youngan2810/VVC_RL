@@ -5,7 +5,8 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from vvcrl.config import fingerprint
 from vvcrl.repository import verify_checkout
 
-def generate():
+def generate(source_commit):
+    if len(source_commit)!=40 or any(c not in "0123456789abcdef" for c in source_commit):raise ValueError("Pass an exact source commit SHA")
     cells=[]
     def markdown(s):cells.append(dict(cell_type='markdown',metadata={},source=textwrap.dedent(s).strip()+'\n'))
     def code(s):cells.append(dict(cell_type='code',metadata={},execution_count=None,outputs=[],source=textwrap.dedent(s).strip()+'\n'))
@@ -14,10 +15,22 @@ def generate():
     Notebook mặc định chỉ preflight: kiểm tra action/bitstream/decode, state thực, hai GPU và một PPO update cơ học trên Train.
     Chỉ đổi `RUN_MINI_TRAINING=True` sau khi xem đầy đủ gate PASS. Test30 chưa sử dụng.
     Source và thiết kế mới không tương thích checkpoint Gaussian/D3QN cũ.''')
+    markdown('''## Reward V2: task gain under a shared bitrate cap
+    Reward = mean F1 gain - price * max(0, (clip bits - cap)/target bits).
+    cap = 1.02 * min(target bits, paired QPA bits). No spare-bit bonus below cap.
+    The bitrate penalty is applied once at the last coding step. State/PPO/GAE/Aux/native hooks are unchanged.
+    Old update40 is a frozen comparison, not a resume input. Keep V1 exports.
+    Mini budget: 40 updates = 80 clips = 20,480 transitions. No Test30.
+    A fresh V2 preflight is required because the reward and experiment binding changed.
+    Set RUN_MINI_TRAINING=True only when ready to run the mini after all new gates pass.
+    The preflight uses disposable weights; mini always starts from the same seed.
+    Default tolerance is 2%; set RATE_TOLERANCE=0 before preflight for a strict cap.
+    A soft penalty is not a hard RC guarantee: validation rejects checkpoints over cap.''')
     code(f'''
     from pathlib import Path
     import os,sys,time,json,subprocess,threading
     SESSION_STARTED=time.monotonic()
+    SOURCE_COMMIT='{source_commit}'
     EXPECTED_SOURCE_SHA256='{fingerprint(ROOT)}'
     REPOSITORY='https://github.com/youngan2810/VVC_RL.git'
     REPO=Path('/kaggle/working/VVC_RL')
@@ -25,12 +38,15 @@ def generate():
     INPUT=Path('/kaggle/input')
     FRAMES=256
     RUN_MINI_TRAINING=False
-    ADDITIONAL_PPO_UPDATES=10  # 2 complete 256-frame clips per update; not epochs
+    REWARD_VERSION='task-budget-v2'
+    RATE_TOLERANCE=.02
+    SEED=20261120
+    ADDITIONAL_PPO_UPDATES=40  # 2 complete 256-frame clips per update; not epochs
     RESUME_CHECKPOINT=''      # only a checkpoint from this exact implementation + identity JSON
     SESSION_HOURS=11.0        # includes setup; clips finish before soft stop when possible
     assert 0<SESSION_HOURS<=11.75
     PREFLIGHT=Path('/kaggle/working')/('vvc_rl_preflight_'+str(time.time_ns()))
-    TRAIN=Path('/kaggle/working/vvc_rl_mini')
+    TRAIN=Path('/kaggle/working/vvc_rl_mini_v2')
     os.environ['YOLOv5_AUTOINSTALL']='false'
     def live(command,cwd=None):
         print('$',*[str(v) for v in command],flush=True)
@@ -53,8 +69,8 @@ def generate():
     assert torch.cuda.is_available() and torch.cuda.device_count()>=2,'Enable two Kaggle GPUs'
     if not REPO.exists():live(['git','clone','--branch','main',REPOSITORY,REPO])
     print('TRACKED_RAW_BYTES_PASS',verify_checkout(REPO))
-    live(['git','-C',REPO,'fetch','origin','main'])
-    commit=subprocess.check_output(['git','-C',str(REPO),'rev-parse','origin/main'],text=True).strip()
+    live(['git','-C',REPO,'fetch','--no-tags','origin',SOURCE_COMMIT])
+    commit=SOURCE_COMMIT
     live(['git','-C',REPO,'checkout','--detach',commit])
     print('CHECKED_OUT_RAW_BYTES_PASS',verify_checkout(REPO))
     sys.path.insert(0,str(REPO))
@@ -85,7 +101,7 @@ def generate():
     code('''
     # Full preflight uses real Train clips for one mechanical PPO update and Val without updates.
     # Synthetic native tests alone never open the training gate.
-    live([sys.executable,'-u','-m','vvcrl','preflight','--output',PREFLIGHT,'--toolchain',TOOLS/'TOOLCHAIN.json','--input',INPUT,'--tools',TOOLS,'--frames',FRAMES],REPO)
+    live([sys.executable,'-u','-m','vvcrl','preflight','--output',PREFLIGHT,'--toolchain',TOOLS/'TOOLCHAIN.json','--input',INPUT,'--tools',TOOLS,'--frames',FRAMES,'--reward-version',REWARD_VERSION,'--rate-tolerance',RATE_TOLERANCE,'--seed',SEED],REPO)
     report=json.loads((PREFLIGHT/'PREFLIGHT_GATE.json').read_text())
     print('PREFLIGHT_STATUS',report['status'])
     assert report['status']=='PASS_READY_FOR_MINI'
@@ -97,12 +113,14 @@ def generate():
         remaining=SESSION_HOURS-(time.monotonic()-SESSION_STARTED)/3600
         assert remaining>.5,'Insufficient session time; preserve SAFE and use a fresh session'
         command=[sys.executable,'-u','-m','vvcrl','train-mini','--output',TRAIN,'--toolchain',TOOLS/'TOOLCHAIN.json','--input',INPUT,'--tools',TOOLS,
-                 '--preflight',PREFLIGHT,'--frames',FRAMES,'--updates',ADDITIONAL_PPO_UPDATES,'--hours',remaining,'--start-mini-training']
+                 '--preflight',PREFLIGHT,'--frames',FRAMES,'--updates',ADDITIONAL_PPO_UPDATES,'--hours',remaining,'--reward-version',REWARD_VERSION,'--rate-tolerance',RATE_TOLERANCE,'--seed',SEED,'--start-mini-training']
         if RESUME_CHECKPOINT:command+=['--resume',RESUME_CHECKPOINT]
         live(command,REPO)
     else:print('MINI_TRAINING_DISABLED — review preflight results first')
     ''')
     notebook={'cells':cells,'metadata':{'kernelspec':{'display_name':'Python 3','language':'python','name':'python3'},'language_info':{'name':'python'},'kaggle':{'isGpuEnabled':True,'isInternetEnabled':True}},'nbformat':4,'nbformat_minor':5}
-    output=ROOT/'notebooks/VVC_RL_QPA_Preflight_Kaggle.ipynb';output.parent.mkdir(exist_ok=True);output.write_text(json.dumps(notebook,ensure_ascii=False,indent=1)+'\n',encoding='utf-8');return output
+    output=ROOT/'notebooks/VVC_RL_QPA_Preflight_Kaggle.ipynb';output.parent.mkdir(exist_ok=True);output.write_bytes((json.dumps(notebook,ensure_ascii=False,indent=1)+'\n').encode('utf-8'));return output
 
-if __name__=='__main__':print(generate())
+if __name__=='__main__':
+    import argparse
+    p=argparse.ArgumentParser();p.add_argument('--source-commit',required=True);a=p.parse_args();print(generate(a.source_commit))

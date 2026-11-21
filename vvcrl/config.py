@@ -2,7 +2,7 @@ from dataclasses import dataclass, asdict
 import hashlib,json
 from pathlib import Path
 
-SCHEMA='vvc-rl-qpa-ppo/1'
+SCHEMA='vvc-rl-qpa-ppo/2'
 TASK='task_retention_f1_v2'
 UPSTREAM='1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f'
 DELTAS=(-2,-1,0,1,2)
@@ -10,6 +10,15 @@ RATES=(50,80,120,160,200)
 W,H,FPS,CTU=480,320,30,128
 NY,NX,N=3,4,12
 FB=W*H*3//2
+
+@dataclass(frozen=True)
+class RewardConfig:
+    version:str='task-budget-v2'
+    rate_tolerance:float=.02
+    def validate(self):
+        if self.version not in ('task-budget-v2','paired-linear-v1') or not 0<=self.rate_tolerance<=.1:
+            raise ValueError('Unknown reward version or invalid bitrate tolerance')
+        return self
 
 @dataclass(frozen=True)
 class PPOConfig:

@@ -4,7 +4,7 @@ from pathlib import Path
 import hashlib,json,multiprocessing as mp,os,time
 import numpy as np
 import torch
-from .config import Profile,atomic_json,canonical,digest
+from .config import Profile,RewardConfig,atomic_json,canonical,digest
 from .model import ActorCritic,model_hash
 from .data import DETECTOR_ID,open_detector,prepared_clip
 from .episode import run_episode,verified_result
@@ -18,7 +18,7 @@ def anchor_episode(spec,detector,source,boxes,profile):
         if r is not None:return r
     folder=base/f'attempt{len(list(base.glob("attempt*"))):03}'
     r,_=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
-      profile=profile,rate=spec['rate'],folder=folder,split=spec['split'],deterministic=True)
+      profile=profile,rate=spec['rate'],folder=folder,split=spec['split'],deterministic=True,reward_config=RewardConfig(**spec.get('reward_config',{})))
     return r
 
 def _worker(spec):
@@ -35,12 +35,13 @@ def _worker(spec):
         if control=='random':
             rng=np.random.default_rng(spec['seed']);fixed=lambda obs:rng.integers(-2,3,12);policy=None
         elif control=='fixed_m2':fixed=lambda obs:np.full(12,-2);policy=None
+        elif control=='fixed_p2':fixed=lambda obs:np.full(12,2);policy=None
         elif control=='noop':fixed=lambda obs:np.zeros(12,int);policy=None
         elif control in ('roi_protect','roi_redistribute'):
             fixed=lambda obs:roi_action(boxes[obs['poc']],control=='roi_redistribute');policy=None
         elif control!='ppo':raise ValueError('Unknown diagnostic control')
         result,batch=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
-          profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'])
+          profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'],reward_config=RewardConfig(**spec.get('reward_config',{})))
         cache_meta=json.loads((cache/key/'cache.json').read_text())
         atomic_json(folder/'collector.json',{'video':spec['video'],'split':spec['split'],'device':spec['device'],'model_sha256':model_hash(model),'input_cache_key':key,'seed':spec['seed'],
           'control':control,'source_stage_timing':cache_meta.get('timing')})

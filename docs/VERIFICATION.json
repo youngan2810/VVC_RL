@@ -1,330 +1,27 @@
 {
-  "date": "2026-11-20",
-  "scope": "Local CPU contracts, actual VVenC/VVdeC fixture encodes and single PPO mechanism updates; no real BDD100K training",
-  "environment": {
-    "python": "3.11.9",
-    "torch": "2.9.1+cpu",
-    "numpy": "2.4.6",
-    "platform": "Windows",
-    "compiler": "MinGW GCC 15.2.0"
-  },
-  "functional_source_sha256": "b0e9450f7350f1763d03232b09459b67c4259da015620f5827087b73c2363714",
+  "date": "2026-11-21",
+  "scope": "Task-budget V2 reward change; native/state/model/PPO/Aux unchanged; no GPU quality claim",
+  "functional_source_sha256": "420ff796b07e673416a41ee04815ead037020c6c6d620aa378003707429d9750",
   "unit_tests": {
-    "count": 42,
+    "count": 60,
     "status": "PASS"
   },
-  "source_provenance": {
-    "official_vvenc_commit": "1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f",
-    "official_blobs_checked": 807,
-    "native_modified_or_added": 8,
-    "packaging_modified_files": [
-      "vendor/vvenc/.gitattributes"
-    ]
-  },
-  "binaries_sha256": {
-    "encoder": "04ea168c2c1b7ff6bfd32113b85945cdd234ec8502e8214af29758520b183205",
-    "vanilla": "812c2536f1bd8fae943180982893fdef944eaa1a291b2f7172eee6ff62a82610",
-    "decoder": "587cd7bdddc8c8837f69c9f267134c20661c7a563c6f7be0a62d1389c93e53de"
-  },
-  "native_mechanics": {
-    "status": "PASS_NATIVE_MECHANICS_ONLY",
-    "synthetic_only": true,
-    "training_ready": false,
-    "checks": {
-      "native_noop_parity": true,
-      "all_five_integer_bins": true,
-      "spatial_mapping": true,
-      "actor_to_encoder": true,
-      "au_bit_accounting": true,
-      "independent_decode": true,
-      "live_state_causality": true
-    },
-    "cases": {
-      "noop": {
-        "bits": 46920,
-        "actual_kbps": 43.9875,
-        "psnr_y_10bit": 39.48795315426326,
-        "bitstream_sha256": "b8083e49942ec56264e386d825536f531c7b26d4749526f0391d9710e369778c",
-        "decoder_native_parity": true,
-        "action_audit": {
-          "qg_candidate_rows": 424,
-          "requested_delta_histogram": {
-            "0": 424
-          },
-          "effective_delta_histogram": {
-            "0": 424
-          },
-          "clipped_rows": 0,
-          "quant_unique_candidates": 54856,
-          "qg_mapping_verified": true,
-          "winning_cu_pixels": 4915200,
-          "winning_qp_pixel_histogram": {
-            "31": 116544,
-            "30": 128928,
-            "29": 133328,
-            "32": 68304,
-            "33": 45056,
-            "34": 121216,
-            "35": 258048,
-            "36": 604160,
-            "40": 153600,
-            "41": 307200,
-            "37": 1227648,
-            "38": 1751168
-          },
-          "winning_coverage_verified": true,
-          "note": "Candidate calls are not winning pixel area. Final CU QP includes residual-free CUs."
-        }
-      },
-      "fixed_-2": {
-        "bits": 47768,
-        "actual_kbps": 44.7825,
-        "psnr_y_10bit": 39.60825719200753,
-        "bitstream_sha256": "aa2740f5d1731db68e2fe6074264cfa7f5755920c7d178f9a30dc46441af6aa8",
-        "decoder_native_parity": true,
-        "action_audit": {
-          "qg_candidate_rows": 424,
-          "requested_delta_histogram": {
-            "-2": 424
-          },
-          "effective_delta_histogram": {
-            "-2": 424
-          },
-          "clipped_rows": 0,
-          "quant_unique_candidates": 55786,
-          "qg_mapping_verified": true,
-          "winning_cu_pixels": 4915200,
-          "winning_qp_pixel_histogram": {
-            "29": 116256,
-            "28": 101024,
-            "27": 94416,
-            "30": 122192,
-            "34": 73728,
-            "32": 88448,
-            "35": 170272,
-            "36": 579584,
-            "40": 153600,
-            "41": 307200,
-            "37": 1075200,
-            "38": 1944576,
-            "31": 88704
-          },
-          "winning_coverage_verified": true,
-          "note": "Candidate calls are not winning pixel area. Final CU QP includes residual-free CUs."
-        }
-      },
-      "fixed_-1": {
-        "bits": 47784,
-        "actual_kbps": 44.7975,
-        "psnr_y_10bit": 39.5337177648818,
-        "bitstream_sha256": "f491ad7f5707ce4bf1d0b6e460329cdba064f20a9621edad1562e3b5ae917fdd",
-        "decoder_native_parity": true,
-        "action_audit": {
-          "qg_candidate_rows": 424,
-          "requested_delta_histogram": {
-            "-1": 424
-          },
-          "effective_delta_histogram": {
-            "-1": 424
-          },
-          "clipped_rows": 0,
-          "quant_unique_candidates": 55128,
-          "qg_mapping_verified": true,
-          "winning_cu_pixels": 4915200,
-          "winning_qp_pixel_histogram": {
-            "30": 116576,
-            "29": 112400,
-            "28": 53456,
-            "31": 59200,
-            "32": 45056,
-            "33": 49536,
-            "34": 169984,
-            "36": 624256,
-            "40": 153600,
-            "41": 307200,
-            "37": 1075200,
-            "38": 1841536,
-            "35": 307200
-          },
-          "winning_coverage_verified": true,
-          "note": "Candidate calls are not winning pixel area. Final CU QP includes residual-free CUs."
-        }
-      },
-      "fixed_1": {
-        "bits": 46184,
-        "actual_kbps": 43.2975,
-        "psnr_y_10bit": 39.325237035090545,
-        "bitstream_sha256": "90b6dc1c7fa10803862442849434c4122557ea398c32da44d2385b5f76df1ad9",
-        "decoder_native_parity": true,
-        "action_audit": {
-          "qg_candidate_rows": 424,
-          "requested_delta_histogram": {
-            "1": 424
-          },
-          "effective_delta_histogram": {
-            "1": 424
-          },
-          "clipped_rows": 0,
-          "quant_unique_candidates": 54326,
-          "qg_mapping_verified": true,
-          "winning_cu_pixels": 4915200,
-          "winning_qp_pixel_histogram": {
-            "32": 116224,
-            "31": 129600,
-            "30": 47616,
-            "33": 144800,
-            "34": 33792,
-            "35": 230432,
-            "36": 491520,
-            "40": 153600,
-            "41": 307200,
-            "37": 1280640,
-            "38": 1979776
-          },
-          "winning_coverage_verified": true,
-          "note": "Candidate calls are not winning pixel area. Final CU QP includes residual-free CUs."
-        }
-      },
-      "fixed_2": {
-        "bits": 46232,
-        "actual_kbps": 43.3425,
-        "psnr_y_10bit": 39.25576890114386,
-        "bitstream_sha256": "79cd2d5e13dfd687329292d733d427bd6c33952ea31fc2e360ac993dd75cefd2",
-        "decoder_native_parity": true,
-        "action_audit": {
-          "qg_candidate_rows": 424,
-          "requested_delta_histogram": {
-            "2": 424
-          },
-          "effective_delta_histogram": {
-            "2": 424
-          },
-          "clipped_rows": 0,
-          "quant_unique_candidates": 53579,
-          "qg_mapping_verified": true,
-          "winning_cu_pixels": 4915200,
-          "winning_qp_pixel_histogram": {
-            "33": 116448,
-            "32": 63360,
-            "31": 94464,
-            "34": 152320,
-            "37": 1233920,
-            "36": 481696,
-            "35": 161792,
-            "40": 275584,
-            "41": 264576,
-            "38": 1944064,
-            "39": 126976
-          },
-          "winning_coverage_verified": true,
-          "note": "Candidate calls are not winning pixel area. Final CU QP includes residual-free CUs."
-        }
-      },
-      "spatial": {
-        "bits": 47664,
-        "actual_kbps": 44.685,
-        "psnr_y_10bit": 39.35393357793543,
-        "bitstream_sha256": "2cd6f67eab34a8aa75470411e8aa5798f11b99e7f37ab512c45a2c840638aa05",
-        "decoder_native_parity": true,
-        "action_audit": {
-          "qg_candidate_rows": 424,
-          "requested_delta_histogram": {
-            "-2": 106,
-            "0": 212,
-            "2": 106
-          },
-          "effective_delta_histogram": {
-            "-2": 106,
-            "0": 212,
-            "2": 106
-          },
-          "clipped_rows": 0,
-          "quant_unique_candidates": 54450,
-          "qg_mapping_verified": true,
-          "winning_cu_pixels": 4915200,
-          "winning_qp_pixel_histogram": {
-            "29": 45520,
-            "30": 75680,
-            "31": 137648,
-            "33": 22272,
-            "34": 61536,
-            "37": 1128448,
-            "32": 67584,
-            "35": 216064,
-            "28": 61440,
-            "27": 88064,
-            "36": 645120,
-            "40": 153600,
-            "41": 307200,
-            "38": 1905024
-          },
-          "winning_coverage_verified": true,
-          "note": "Candidate calls are not winning pixel area. Final CU QP includes residual-free CUs."
-        }
-      },
-      "actor_forced_plus1": {
-        "bits": 46184,
-        "actual_kbps": 43.2975,
-        "psnr_y_10bit": 39.325237035090545,
-        "bitstream_sha256": "90b6dc1c7fa10803862442849434c4122557ea398c32da44d2385b5f76df1ad9",
-        "decoder_native_parity": true,
-        "action_audit": {
-          "qg_candidate_rows": 424,
-          "requested_delta_histogram": {
-            "1": 424
-          },
-          "effective_delta_histogram": {
-            "1": 424
-          },
-          "clipped_rows": 0,
-          "quant_unique_candidates": 54326,
-          "qg_mapping_verified": true,
-          "winning_cu_pixels": 4915200,
-          "winning_qp_pixel_histogram": {
-            "32": 116224,
-            "31": 129600,
-            "30": 47616,
-            "33": 144800,
-            "34": 33792,
-            "35": 230432,
-            "36": 491520,
-            "40": 153600,
-            "41": 307200,
-            "37": 1280640,
-            "38": 1979776
-          },
-          "winning_coverage_verified": true,
-          "note": "Candidate calls are not winning pixel area. Final CU QP includes residual-free CUs."
-        }
-      }
-    }
-  },
-  "synthetic_real_codec_single_ppo_update": {
-    "status": "PASS_SYNTHETIC_REAL_CODEC_SINGLE_UPDATE",
-    "training_ready": false,
-    "learning_quality_claim": false,
-    "checkpoint_reload_exact": true,
-    "stats": {
-      "policy_loss": -0.002989363856613636,
-      "value_loss": 0.0034916617441922426,
-      "aux_loss": 0.6583030621210734,
-      "entropy_mean": 1.6075396140416462,
-      "approx_kl_joint": 2.1868695815404255e-05,
-      "clip_fraction": 0.0,
-      "grad_norm": 2.1186136404673257,
-      "policy_head_gradient_norm": 2.101777915248764,
-      "optimizer_steps": 3,
-      "early_stop": false,
-      "replay_logprob_error": 3.814697265625e-06,
-      "replay_value_error": 5.960464477539063e-08,
-      "actor_head_change": 0.0003004958271048963,
-      "critic_head_change": 0.0002986341714859009
-    }
-  },
-  "64_frame_multigop_check": {
+  "native_v2_mechanism": {
     "status": "PASS_SYNTHETIC_REAL_CODEC_SINGLE_UPDATE",
     "frames": 64,
-    "decode_parity": true,
+    "fixture": "synthetic brightness, not YOLO/BDD100K",
+    "bitstream_sha256": "ae67df79b4fd6c43d1da341cc5d68b47797b3537c62c19f7dbf0895bcab0dfce",
+    "decoder_native_parity": true,
+    "reward_identity_error": 0.0,
+    "terminal_rate_penalty_count": 1,
+    "clip_objective": {
+      "task_component": 0.0,
+      "bit_component": -0.0033174999999999954,
+      "raw": -0.0033174999999999954,
+      "budget_cap_bits": 101118.72,
+      "overshoot_fraction": 0.0033174999999999954,
+      "within_cap": false
+    },
     "action_audit": {
       "qg_candidate_rows": 848,
       "requested_delta_histogram": {
@@ -367,40 +64,43 @@
         "22": 4400
       },
       "winning_coverage_verified": true,
+      "nonzero_requests_zeroed": 0,
+      "nonzero_requests_zeroed_fraction": 0.0,
       "note": "Candidate calls are not winning pixel area. Final CU QP includes residual-free CUs."
     },
-    "ppo": {
-      "policy_loss": -0.001412619526187579,
-      "value_loss": 0.01869360792140166,
-      "aux_loss": 0.7016902565956116,
-      "entropy_mean": 1.6075295607248943,
-      "approx_kl_joint": 1.4340194563070932e-05,
+    "stats": {
+      "policy_loss": -0.0020153901229302087,
+      "value_loss": 0.005252983886748552,
+      "aux_loss": 0.6995874245961508,
+      "entropy_mean": 1.6075589656829834,
+      "approx_kl_joint": 1.3031686345736185e-05,
       "clip_fraction": 0.0,
-      "grad_norm": 1.2092147668202717,
-      "policy_head_gradient_norm": 1.1400261024730813,
+      "grad_norm": 1.6057785352071126,
+      "policy_head_gradient_norm": 1.5785873868748845,
       "optimizer_steps": 3,
       "early_stop": false,
       "replay_logprob_error": 3.814697265625e-06,
       "replay_value_error": 7.450580596923828e-08,
-      "actor_head_change": 0.00030049646738916636,
-      "critic_head_change": 0.0003004595637321472
+      "actor_head_change": 0.0003004966420121491,
+      "critic_head_change": 0.00029997434467077255
     },
-    "training_ready": false
+    "checkpoint_reload_exact": true,
+    "training_ready": false,
+    "learning_quality_claim": false
   },
+  "preserved_base_commit": "f33a5f6ae9153f9c5d18afea2e3698a6efaaced4",
+  "unchanged_modules_sha256": {
+    "vvcrl/state.py": "d6ef9710edd992c7c9101d5d8f6d3561959c2a45ecf52c62e2f579242deaed16",
+    "vvcrl/model.py": "62c553f0f67f00fe10dc9a8136a0ca97dadea4cb50791b371b710e20ae146325",
+    "vvcrl/ppo.py": "a38265161d2bf45c703c5150ef643bb470c895a602bd0b828b461e9a0b550d88",
+    "vvcrl/engine.py": "38da2971a7612323a14d19085433359a2c9be0adf417f67e7b0cffc64e66ef79",
+    "vvcrl/locked/assets/dataset_lock.json": "f7a600f501de622f66ace04bb0b12ec5da0dab988cd54732d614f6b16495aaea",
+    "native/online_manifest.json": "eec63d72de97f89a4b6a560bd8ea4d0f6d65aff77c8a7d41d3098a40bbcb25ac"
+  },
+  "local_binaries_reused": "Native C++/header sources and integration manifest unchanged; existing tested Windows binaries reused, not a new native build",
   "real_bdd100k_yolo_two_gpu_preflight": {
     "status": "NOT_RUN_LOCALLY",
-    "training_ready": false,
-    "reason": "CPU-only local host; locked MOV files and detector weights are not available locally"
+    "training_ready": false
   },
-  "next_required": "Run exact-source real-data Kaggle preflight; review SAFE evidence before enabling mini training. No task-accuracy or BD-rate improvement claim.",
-  "packaging_regressions": {
-    "raw_git_bytes_check": "PASS",
-    "copy_executable_preserves_mode": "PASS",
-    "previous_linux_ci": "PASS: 41 unit contracts, both VVenC builds, VVdeC build and full native smoke at 01b3927"
-  },
-  "portable_fingerprint_fix": {
-    "reason": "Windows Path sorting folds case; Linux does not",
-    "ordering": "relative POSIX path strings; case-sensitive",
-    "notebook_pin_ci_check": "scripts/verify_notebook.py, now required by CI"
-  }
+  "next_required": "Exact-source V2 Kaggle preflight; then fresh 40-update mini A/B. No full training or Test30 until useful-learning review."
 }

@@ -3,18 +3,19 @@ from pathlib import Path
 import itertools,json,time,uuid
 import numpy as np
 import torch
-from .config import Profile,PPOConfig,RATES,atomic_json,digest
+from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest
 from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash
 from .ppo import PPO
 from .reward import RatePrices
+from .validation import validation_summary,rollout_summary
 from .collect import collect,load_batches
 from .gates import binding,require_gate
 from .artifacts import export_run
 
 def save_checkpoint(path,model,ppo,prices,iteration,episodes,bind,best,seed):
     p=Path(path);p.parent.mkdir(parents=True,exist_ok=True);tmp=p.with_name(p.name+'.tmp')
-    torch.save({'schema':'vvc-rl-checkpoint/1','model':model.state_dict(),'optimizer':ppo.optimizer.state_dict(),
+    torch.save({'schema':'vvc-rl-checkpoint/2','model':model.state_dict(),'optimizer':ppo.optimizer.state_dict(),
       'prices':prices.state(),'iteration':iteration,'episodes':episodes,'binding':bind,'best_validation':best,'seed':seed,
       'torch_rng':torch.get_rng_state(),'model_sha256':model_hash(model)},tmp)
     tmp.replace(p);atomic_json(p.with_suffix('.identity.json'),{'sha256':digest(p),'model_sha256':model_hash(model),'iteration':iteration,'binding':bind})
@@ -23,14 +24,14 @@ def load_checkpoint(path,model,ppo,expected):
     p=Path(path);identity=json.loads(p.with_suffix('.identity.json').read_text())
     if digest(p)!=identity['sha256']:raise ValueError('Checkpoint digest differs')
     c=torch.load(p,map_location='cpu',weights_only=True)
-    if c['schema']!='vvc-rl-checkpoint/1' or c['binding']!=expected:raise ValueError('Checkpoint source/profile/environment differs')
+    if c.get('schema')!='vvc-rl-checkpoint/2' or c['binding']!=expected:raise ValueError('Checkpoint reward/source/profile/environment differs; V1 checkpoints are frozen controls, not V2 resumes')
     model.load_state_dict(c['model']);ppo.optimizer.load_state_dict(c['optimizer'])
     if model_hash(model)!=c['model_sha256']:raise ValueError('Checkpoint weight identity differs')
     torch.set_rng_state(c['torch_rng']);return c
 
-def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val_every=5,profile=Profile(),seed=20261120,resume=None,authorized=False,hours=10.):
+def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val_every=5,profile=Profile(),seed=20261120,resume=None,authorized=False,hours=10.,reward_config=RewardConfig()):
     if not authorized:raise RuntimeError('Training disabled: explicitly pass --start-mini-training after reviewing full preflight')
-    root=Path(root);output=Path(output);bind=binding(root,toolchain,profile,2);require_gate(preflight,bind)
+    root=Path(root);output=Path(output);bind=binding(root,toolchain,profile,2,reward_config);require_gate(preflight,bind)
     if not 1<=updates or val_every<1:raise ValueError('Invalid update budget')
     output.mkdir(parents=True,exist_ok=True);protocol=output/'TRAIN_BINDING.json'
     if (output/'checkpoints/latest.pt').exists() and not resume:raise ValueError('Existing training checkpoint: explicitly resume instead of restarting')
@@ -45,7 +46,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
     schedule=list(itertools.product(catalog.selected['train'],RATES));deadline=time.monotonic()+hours*3600
     def specs(items,split,snapshot,tag):
         return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
-          snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),video=v,split=split,rate=r,price=prices.values[str(r)],
+          snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),video=v,split=split,rate=r,price=prices.values[str(r)],
           seed=seed+episodes+i,device=f'cuda:{i}',episode_id=f'{invocation}_{tag}_{i}') for i,(v,r) in enumerate(items)]
     try:
         for _ in range(updates):
@@ -56,8 +57,8 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
             items=[schedule[(episodes+i)%len(schedule)] for i in range(2)]
             rows=collect(specs(items,'train',snapshot,f'train_update{iteration:06}'))
             stats=ppo.update(load_batches(rows));episodes+=2;iteration+=1
-            prices.update([r['result'] for r in rows],training=True)
-            atomic_json(output/'updates'/f'{iteration:06}.json',{'iteration':iteration,'episodes':episodes,'stats':stats,'prices':prices.state(),
+            prices.update([r['result'] for r in rows],training=True,config=reward_config)
+            atomic_json(output/'updates'/f'{iteration:06}.json',{'iteration':iteration,'episodes':episodes,'stats':stats,'prices':prices.state(),'rollout_diagnostics':rollout_summary(rows),
               'completed':[{'video':r['video'],'rate':r['result']['rate'],'bits':r['result']['bits'],'budget':r['result']['budget'],'quality':r['result']['task_retention_f1_v2']} for r in rows]})
             latest=output/'checkpoints/latest.pt';save_checkpoint(latest,model,ppo,prices,iteration,episodes,bind,best,seed)
             atomic_json(output/'PROGRESS.json',{'iteration':iteration,'episodes':episodes,'checkpoint':'checkpoints/latest.pt','best_validation_gain':best,'checkpoint_sha256':digest(latest)})
@@ -68,15 +69,11 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
                     if time.monotonic()>deadline-900:break
                     validation+=collect(specs(val_items[j:j+2],'val',val_snapshot,f'val_update{iteration:06}_batch{j:03}'))
                 if model_hash(model)!=before:raise ValueError('Validation changed model')
-                complete=len(validation)==len(val_items);quality=[];feasible=True;detail=[]
-                for r in validation:
-                    result=r['result'];anchor_quality=result['anchor_quality']
-                    anchor_bits=result['anchor_bits'];no_extra=result['bits']<=anchor_bits*1.02;budget_ok=result['bits']<=result['budget']*1.02
-                    delta=result['task_retention_f1_v2']-anchor_quality;quality.append(delta);feasible &= no_extra and budget_ok
-                    detail.append({'video':r['video'],'rate':result['rate'],'delta_quality':delta,'actual_kbps':result['actual_kbps'],'no_extra_bits':no_extra,'budget_ok':budget_ok})
-                score=float(np.mean(quality)) if quality else None
-                atomic_json(output/'validations'/f'{iteration:06}.json',{'complete':complete,'feasible':feasible,'macro_delta_quality':score,'points':detail,'model_unchanged':True})
-                if complete and feasible and score is not None and score>best:
+                report=validation_summary(validation,val_items,reward_config)
+                score=report['macro_delta_quality']
+                report.update(model_unchanged=True,rollout_diagnostics=rollout_summary(validation))
+                atomic_json(output/'validations'/f'{iteration:06}.json',report)
+                if report['eligible_checkpoint'] and score>best:
                     best=score;save_checkpoint(output/'checkpoints/best_validation.pt',model,ppo,prices,iteration,episodes,bind,best,seed)
                 save_checkpoint(latest,model,ppo,prices,iteration,episodes,bind,best,seed)
             atomic_json(output/'PROGRESS.json',{'iteration':iteration,'episodes':episodes,'checkpoint':'checkpoints/latest.pt','best_validation_gain':best,'checkpoint_sha256':digest(latest)})

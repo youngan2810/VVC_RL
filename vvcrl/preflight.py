@@ -3,7 +3,7 @@ from pathlib import Path
 import json,subprocess,sys,time
 import numpy as np
 import torch
-from .config import Profile,PPOConfig,atomic_json,digest
+from .config import Profile,PPOConfig,RewardConfig,atomic_json,digest
 from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash
 from .ppo import PPO
@@ -12,9 +12,9 @@ from .gates import MANDATORY,binding,write_gate
 from .native_smoke import run_smoke
 from .artifacts import export_run
 
-def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),workers=2,seed=20261120):
+def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),workers=2,seed=20261120,reward_config=RewardConfig()):
     root=Path(root);output=Path(output);output.mkdir(parents=True,exist_ok=False);checks={k:False for k in MANDATORY}
-    bind=binding(root,toolchain,profile,workers);evidence=[]
+    bind=binding(root,toolchain,profile,workers,reward_config);evidence=[]
     try:
         if workers!=2 or not torch.cuda.is_available() or torch.cuda.device_count()<2:raise RuntimeError('Full Kaggle preflight requires two real CUDA collectors; CPU fixture cannot authorize training')
         unit=output/'unit_contracts.log'
@@ -31,7 +31,7 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         catalog.check_available(('train','val'))
         def specs(videos,split,snapshot,model,tag):
             return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
-              snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),video=v,split=split,rate=120,price=1.,
+              snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),video=v,split=split,rate=120,price=1.,
               seed=seed+i,device=f'cuda:{i}',episode_id=f'{tag}_{i}') for i,v in enumerate(videos)]
         train=collect(specs(catalog.selected['train'][:2],'train',snapshot,model,'mechanical_train'))
         if {r['device'] for r in train}!={'cuda:0','cuda:1'} or len({r['pid'] for r in train})!=2:raise ValueError('Two-GPU collection contract failed')
