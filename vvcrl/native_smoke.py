@@ -6,6 +6,7 @@ import torch
 from .config import Profile,FB,W,H,atomic_json,digest
 from .episode import run_episode
 from .model import ActorCritic
+from .controls import roi_action
 
 class FixtureDetector:
     """Only tests mechanics. Never accepted as a real detector by the training gate."""
@@ -46,9 +47,14 @@ def run_smoke(toolchain,output):
     if not all(r['action_audit']['effective_delta_histogram'].get(str(d)) for d in (-2,0,2)):raise ValueError('Spatial mapping failed')
     probe=ActorCritic().eval()
     # A deliberately forced, untrained probe tests wiring, never learned quality.
-    with torch.no_grad():probe.actor.weight.zero_();probe.actor.bias.zero_();probe.actor.bias[3]=10
+    with torch.no_grad():probe.actor.weight.zero_();probe.actor.bias.zero_();probe.actor.bias[[3,8]]=10
     r,_=case('actor_forced_plus1',model=probe,anchor=anchor)
     if r['bitstream_sha256']!=results['fixed_1']['bitstream_sha256']:raise ValueError('Actor categories do not reproduce the fixed +1 native action')
+    # The same 12-CTU encoder API must also reproduce a coherent two-region map.
+    roi,_=case('roi_control',fixed=lambda obs:roi_action(boxes[obs['poc']],True),anchor=anchor)
+    with torch.no_grad():probe.actor.bias.zero_();probe.actor.bias[[0,8]]=10
+    r,_=case('actor_forced_roi',model=probe,anchor=anchor)
+    if r['bitstream_sha256']!=roi['bitstream_sha256']:raise ValueError('Semantic factors do not reproduce ROI -2 / background +1')
     summary={'status':'PASS_NATIVE_MECHANICS_ONLY','synthetic_only':True,'training_ready':False,
       'checks':{'native_noop_parity':True,'all_five_integer_bins':True,'spatial_mapping':True,'actor_to_encoder':True,'au_bit_accounting':True,'independent_decode':True,'live_state_causality':True},
       'cases':{n:{k:r[k] for k in ('bits','actual_kbps','psnr_y_10bit','bitstream_sha256','decoder_native_parity','action_audit')} for n,r in results.items()}}

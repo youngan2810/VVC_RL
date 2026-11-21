@@ -2,7 +2,7 @@ from dataclasses import dataclass, asdict
 import hashlib,json
 from pathlib import Path
 
-SCHEMA='vvc-rl-qpa-ppo/2'
+SCHEMA='vvc-rl-qpa-ppo/3'
 TASK='task_retention_f1_v2'
 UPSTREAM='1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f'
 DELTAS=(-2,-1,0,1,2)

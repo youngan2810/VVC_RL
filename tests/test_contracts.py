@@ -29,16 +29,46 @@ class ActionPPOTests(unittest.TestCase):
     def setUp(self):torch.manual_seed(123);self.m=ActorCritic()
     def test_joint_log_probability(self):
         b=batch(self.m);o=self.m.evaluate(torch.tensor(b['x']),torch.tensor(b['g']),torch.tensor(b['actions']))
-        dist=torch.distributions.Categorical(logits=o['logits'])
-        torch.testing.assert_close(o['log_prob'],dist.log_prob(torch.tensor(b['actions'])).sum(-1))
+        dist=torch.distributions.Categorical(logits=o['factor_logits'])
+        torch.testing.assert_close(o['log_prob'],(dist.log_prob(o['factor_actions'])*o['active_factors']).sum(-1))
     def test_integer_category_domain(self):
         b=batch(self.m);self.assertEqual(b['actions'].dtype,np.int64);self.assertTrue(np.isin(b['actions']-2,[-2,-1,0,1,2]).all())
     def test_argmax_can_select_nonzero(self):
-        with torch.no_grad():self.m.actor.weight.zero_();self.m.actor.bias[4]=10
+        with torch.no_grad():self.m.actor.weight.zero_();self.m.actor.bias[[4,9]]=10
         b=batch(self.m);o=self.m.act(b['x'][0],b['g'][0],True);self.assertTrue((o['actions']==4).all())
     def test_entropy_joint_and_mean(self):
         b=batch(self.m);o=self.m.evaluate(torch.tensor(b['x']),torch.tensor(b['g']))
-        torch.testing.assert_close(o['entropy_joint'],12*o['entropy_mean'])
+        torch.testing.assert_close(o['entropy_joint'],o['active_factors'].sum(-1)*o['entropy_mean'])
+    def test_joint_distribution_is_normalized_over_25_distinct_maps(self):
+        b=batch(self.m,n=2);x=torch.tensor(b['x'][:1]);g=torch.tensor(b['g'][:1]);roi=x[:,0].reshape(1,12)>0
+        x[:,0,0,0]=1;x[:,0,0,1]=0;roi=x[:,0].reshape(1,12)>0
+        probability=0.
+        for car in range(5):
+            for background in range(5):
+                a=torch.where(roi,car,background).long();o=self.m.evaluate(x,g,a);probability+=o['log_prob'].exp().item()
+        self.assertAlmostEqual(probability,1.,places=5)
+    def test_absent_region_is_marginalized_and_has_no_actor_gradient(self):
+        b=batch(self.m,n=2);x=torch.tensor(b['x']);x[:,0]=0;g=torch.tensor(b['g'])
+        o=self.m.evaluate(x,g);self.assertFalse(o['active_factors'][:,0].any());self.assertTrue(o['active_factors'][:,1].all())
+        torch.testing.assert_close(o['entropy_joint'],o['entropy_mean'])
+        grad=torch.autograd.grad(o['log_prob'].sum(),self.m.actor.weight)[0]
+        self.assertEqual(float(grad[:5].abs().max()),0.)
+        probability=0.
+        for a in range(5):probability+=self.m.evaluate(x[:1],g[:1],torch.full((1,12),a,dtype=torch.long))['log_prob'].exp().item()
+        self.assertAlmostEqual(probability,1.,places=5)
+    def test_sampled_maps_are_region_coherent_and_replay_exactly(self):
+        b=batch(self.m,n=64);x=torch.tensor(b['x']);g=torch.tensor(b['g']);a=torch.tensor(b['actions'])
+        for row,roi in zip(a,x[:,0].reshape(-1,12)>0):
+            for mask in (roi,~roi):
+                if mask.any():self.assertEqual(len(row[mask].unique()),1)
+        o=self.m.evaluate(x,g,a);np.testing.assert_allclose(o['log_prob'].detach().numpy(),b['log_prob'],atol=2e-5)
+    def test_incoherent_map_is_rejected_before_ppo(self):
+        b=batch(self.m,n=2);x=torch.tensor(b['x']);x[:,0]=0;g=torch.tensor(b['g']);a=torch.full((2,12),2,dtype=torch.long);a[0,0]=3
+        with self.assertRaisesRegex(ValueError,'coherent'):self.m.evaluate(x,g,a)
+    def test_both_regions_can_learn_any_legal_sign(self):
+        b=batch(self.m,n=2);x=torch.tensor(b['x']);x[:,0]=0;x[:,0,0,0]=1;g=torch.tensor(b['g'])
+        with torch.no_grad():self.m.actor.weight.zero_();self.m.actor.bias.zero_();self.m.actor.bias[4]=10;self.m.actor.bias[5]=10
+        o=self.m.evaluate(x,g,deterministic=True);self.assertTrue((o['actions'][:,0]==4).all());self.assertTrue((o['actions'][:,1:]==0).all())
     def test_invalid_categories_rejected(self):
         b=batch(self.m);b['actions'][0,0]=5
         with self.assertRaises(ValueError):self.m.evaluate(torch.tensor(b['x']),torch.tensor(b['g']),torch.tensor(b['actions']))

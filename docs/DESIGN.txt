@@ -1,10 +1,37 @@
-CURRENT REVISION: TASK-BUDGET V2 (2026-11-21)
+CURRENT POLICY: SEMANTIC-REGION PPO; UNCHANGED TASK-BUDGET V2 OBJECTIVE
 
-Scope: reward-only learning experiment after the reviewed frozen V1 check.
-Keep StateBuilder (8 spatial / 15 global), ActorCritic, PPO-Clip, GAE,
-Multi-Categorical {-2,-1,0,1,2}, Auxiliary and native encoder hooks unchanged.
-Keep the locked mini split 16 Train / 4 Validation, 256-frame windows, rates,
-seed, 40-update budget and optimizer hyperparameters for the first A/B run.
+Evidence: the independent-CTU V2 run had 0 coherent two-region maps in
+20,150 sampled frames containing both regions. The expected occurrence
+of an exact ROI(-2)/background(+1) map in 20,480 Train frames was 0.0000629.
+This is an exploration/credit bottleneck hypothesis, not an injection failure
+or proof that coordinated maps are the only useful policy.
+
+Controlled change: two learned categorical factors, ROI and background.
+ROI = existing source occupancy > 0; no decoded-current-frame cue or GT label.
+Each region pools its own actor logits by actual CTU area, then samples one
+category in {-2,-1,0,1,2}. Map the factors back to 12 CTU residuals. Native QPA
+still supplies locally varying base QP. Signs are unrestricted: ROI can receive
+positive QP, background negative QP, or both no-op, depending on learned logits.
+An empty region contributes no log probability or entropy. The 12-category
+rollout map uniquely identifies active factors; reject incoherent old maps.
+PPO ratio uses the sum of active factor log probabilities, never 12 copies.
+This restricts fine spatial residual freedom; it is a sample-budget trade-off,
+not a claim of an optimal final action space. A fresh mini must test it.
+
+Keep StateBuilder (8 spatial / 15 global), PPO-Clip, GAE lambda=0.95,
+Auxiliary architecture, no-op prior, native hooks, metrics and V2 objective.
+Keep 16 Train / 4 Validation, 256 frames, rates, seed and 40-update budget.
+No Validation/Test optimization. No full training or performance claim.
+
+Rejected combined change: GAE lambda=1. It propagates the actual terminal
+cost without direct attenuation, but recorded overshooting V2 batches showed
+much larger value gradients (example 1.22 -> 15.97). Do not combine a new
+variance/critic problem with the policy ablation. This probe is not a proof
+that lambda=1 cannot work with an appropriately controlled critic experiment.
+
+Rationale references: PPO arXiv:1707.06347; GAE arXiv:1506.02438; joint-action
+credit-assignment discussion in COMA arXiv:1705.08926. This is not COMA: no
+learned counterfactual Q baseline is introduced or claimed.
 
 Q = mean per-frame detection retention F1; Q0 = paired QPA/no-op value.
 C = target bitrate * clip duration; B/B0 = actual Annex-B bits of policy/QPA.
@@ -36,15 +63,20 @@ Argmax is the primary deployment mode; never pick a favorable sampling seed.
 Compare QPA, uniform +/-2, ROI controls, random and frozen V1 before full runs.
 ROI's extra bits must be reported; a 2% cap is not exact rate matching or BD-rate.
 
-Compatibility: checkpoint /2 and experiment binding include reward config.
-Do NOT resume the old V1 optimizer into V2. Keep its original export as control.
-V2 mini starts from the same seed/initialization, with its own full preflight.
+Compatibility: checkpoint format /2, experiment schema /3 and source binding
+distinguish the changed policy. Do NOT resume old independent-CTU V1/V2 models,
+optimizers or preflight. Keep the original exports as frozen controls.
+The regional mini starts fresh with the same seed and its own full preflight.
+Both actor heads clone the original initialized head; on the same host/seed,
+shared/Critic/Aux tensors and CPU RNG state are preserved. Heads subsequently
+train independently. The architecture/trajectory is still a different policy.
 paired-linear-v1 is retained as an explicit fresh A/B formula, not default.
-No GPU BDD100K V2 training result has been obtained locally.
+No GPU BDD100K regional-policy training result has been obtained locally.
 
 The specification below is the historical V1 design. Its reward equations,
 old implementation-status statements and budget-price target are superseded
-by the V2 section above. State/action/native design is retained.
+by the current section above. State/native design is retained; policy changes
+from independent CTUs to two semantic-region factors as stated above.
 
 ==========================================================================
 HISTORICAL V1 SPECIFICATION

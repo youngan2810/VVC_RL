@@ -15,13 +15,16 @@ def generate(source_commit):
     Notebook mặc định chỉ preflight: kiểm tra action/bitstream/decode, state thực, hai GPU và một PPO update cơ học trên Train.
     Chỉ đổi `RUN_MINI_TRAINING=True` sau khi xem đầy đủ gate PASS. Test30 chưa sử dụng.
     Source và thiết kế mới không tương thích checkpoint Gaussian/D3QN cũ.''')
-    markdown('''## Reward V2: task gain under a shared bitrate cap
+    markdown('''## Semantic-region policy; unchanged V2 objective
+    PPO learns two categorical residuals (source ROI/background), mapped to the 12 CTUs.
+    QPA remains active. Both factors may choose -2,-1,0,+1,+2; no forced ROI protection.
+    Inactive factors are marginalized; log-probability counts active factors once.
     Reward = mean F1 gain - price * max(0, (clip bits - cap)/target bits).
     cap = 1.02 * min(target bits, paired QPA bits). No spare-bit bonus below cap.
-    The bitrate penalty is applied once at the last coding step. State/PPO/GAE/Aux/native hooks are unchanged.
-    Old update40 is a frozen comparison, not a resume input. Keep V1 exports.
+    The bitrate penalty is applied once at the last coding step. State/reward/GAE/Aux/native hooks are unchanged.
+    Old V1/V2 update40 models are frozen comparisons, not resume inputs. Keep their exports.
     Mini budget: 40 updates = 80 clips = 20,480 transitions. No Test30.
-    A fresh V2 preflight is required because the reward and experiment binding changed.
+    A fresh preflight is required because the policy/action distribution changed.
     Set RUN_MINI_TRAINING=True only when ready to run the mini after all new gates pass.
     The preflight uses disposable weights; mini always starts from the same seed.
     Default tolerance is 2%; set RATE_TOLERANCE=0 before preflight for a strict cap.
@@ -46,7 +49,7 @@ def generate(source_commit):
     SESSION_HOURS=11.0        # includes setup; clips finish before soft stop when possible
     assert 0<SESSION_HOURS<=11.75
     PREFLIGHT=Path('/kaggle/working')/('vvc_rl_preflight_'+str(time.time_ns()))
-    TRAIN=Path('/kaggle/working/vvc_rl_mini_v2')
+    TRAIN=Path('/kaggle/working/vvc_rl_mini_regions')
     os.environ['YOLOv5_AUTOINSTALL']='false'
     def live(command,cwd=None):
         print('$',*[str(v) for v in command],flush=True)

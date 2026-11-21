@@ -1,7 +1,7 @@
 {
   "date": "2026-11-21",
-  "scope": "Task-budget V2 reward change; native/state/model/PPO/Aux unchanged; no GPU quality claim",
-  "functional_source_sha256": "420ff796b07e673416a41ee04815ead037020c6c6d620aa378003707429d9750",
+  "scope": "Current policy proof is in semantic_region_revision; all preexisting V2 test/result fields below are historical and preserved.",
+  "functional_source_sha256": "5bf88f1bb97f09da12a48c17cd0fe000f231ef0fe33d00c62f3d55ccf0b51697",
   "unit_tests": {
     "count": 60,
     "status": "PASS"
@@ -102,5 +102,129 @@
     "status": "NOT_RUN_LOCALLY",
     "training_ready": false
   },
-  "next_required": "Exact-source V2 Kaggle preflight; then fresh 40-update mini A/B. No full training or Test30 until useful-learning review."
+  "next_required": "Exact-source V2 Kaggle preflight; then fresh 40-update mini A/B. No full training or Test30 until useful-learning review.",
+  "historical_task_budget_v2_source_sha256": "420ff796b07e673416a41ee04815ead037020c6c6d620aa378003707429d9750",
+  "semantic_region_revision": {
+    "date": "2026-11-21",
+    "base_commit": "e9c38efb12af739dc114c9a009764a6371b38bea",
+    "functional_source_sha256": "5bf88f1bb97f09da12a48c17cd0fe000f231ef0fe33d00c62f3d55ccf0b51697",
+    "change": "Two categorical source-ROI/background factors mapped to the unchanged 12 CTU native API. Inactive factors marginalized; exact likelihood replay.",
+    "historical_v2_evidence": {
+      "train_frames": 20480,
+      "both_regions_present": 20150,
+      "coherent_region_maps_sampled": 0,
+      "expected_exact_roi_redistribute_occurrences": 6.286850280396163e-05,
+      "interpretation": "Measured exploration bottleneck, not proof of the sole cause of V2 failure."
+    },
+    "unit_tests": {
+      "count": 65,
+      "status": "PASS"
+    },
+    "ppo_config": {
+      "learning_rate": 0.0001,
+      "epochs": 3,
+      "minibatch": 64,
+      "clip": 0.2,
+      "gamma": 1.0,
+      "gae_lambda": 0.95,
+      "value_coef": 0.5,
+      "entropy_coef": 0.01,
+      "auxiliary_coef": 0.1,
+      "max_grad": 0.5,
+      "target_kl": 0.05,
+      "reward_scale": 100.0
+    },
+    "initialization_check": "On same host/seed: 20 shared/Critic/Aux tensors, original actor head and CPU RNG identical to baseline; heads clone then train independently.",
+    "native_smoke": {
+      "status": "PASS_NATIVE_MECHANICS_ONLY",
+      "checks": {
+        "native_noop_parity": true,
+        "all_five_integer_bins": true,
+        "spatial_mapping": true,
+        "actor_to_encoder": true,
+        "au_bit_accounting": true,
+        "independent_decode": true,
+        "live_state_causality": true
+      },
+      "cases": 9,
+      "all_decoder_parity": true,
+      "regional_actor_and_control_bitstream_sha256": "3bc15cb15a8a2bb51e3133e154b30a4b8fcce7d164b40d60828cdea7e4933095",
+      "regional_actor_matches_control": true,
+      "forced_plus1_actor_matches_control": true
+    },
+    "synthetic_real_codec_update": {
+      "status": "PASS_SYNTHETIC_REAL_CODEC_SINGLE_UPDATE",
+      "frames": 64,
+      "decoder_native_parity": true,
+      "reward_identity_error": 0.0,
+      "before_model": "cca7f395b4436ff4c6bafb898034b3132557a647c37aa52dbe18abbeca7c371d",
+      "after_model": "0f58e6814b2e4c39a7831e75c1a407c3a947121c067c64e89baf66d82b4ba64a",
+      "checkpoint_reload_exact": true,
+      "stats": {
+        "policy_loss": -0.0006980200608571371,
+        "value_loss": 0.002087957264545063,
+        "aux_loss": 0.6961604158083597,
+        "entropy_mean": 1.6075737873713176,
+        "approx_kl_joint": 3.711630900700887e-06,
+        "clip_fraction": 0.0,
+        "grad_norm": 0.46669909358024597,
+        "policy_head_gradient_norm": 0.3991120540331618,
+        "optimizer_steps": 3,
+        "early_stop": false,
+        "replay_logprob_error": 4.76837158203125e-07,
+        "replay_value_error": 7.450580596923828e-08,
+        "actor_head_change": 0.00030049600172787905,
+        "critic_head_change": 0.00030046701431274414
+      },
+      "training_ready": false,
+      "learning_quality_claim": false
+    },
+    "synthetic_contextual_policy_learning_probe": {
+      "scope": "Synthetic contextual bandit, not VVC, F1 or QPA comparison. Two region target signs reverse with observed context. Scalar reward only. Auxiliary masked out only for this isolated policy probe.",
+      "updates": 40,
+      "batch": 256,
+      "seeds": [
+        11,
+        23,
+        47
+      ],
+      "regional_full_map_accuracy": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "original_full_map_accuracy": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "original_per_ctu_accuracy": [
+        0.4970703125,
+        0.5020345052083334,
+        0.4769694010416667
+      ]
+    },
+    "rejected_combined_lambda_change": {
+      "reason": "Full-return estimator preserves delayed terminal credit but large observed value gradients could dominate global clipping. Production remains lambda=.95; this is not a proof lambda=1 cannot work.",
+      "recorded_batches_checked": 5,
+      "example_update": 21,
+      "lambda095_value_gradient_norm": 1.2182883295099547,
+      "lambda1_value_gradient_norm": 15.967337151844589
+    },
+    "unchanged_source_sha256": {
+      "vvcrl/state.py": "d6ef9710edd992c7c9101d5d8f6d3561959c2a45ecf52c62e2f579242deaed16",
+      "vvcrl/reward.py": "e62054a7ffe4d0df623bc30c1083da9814c716fb8c99a092c7d564d9f86d7334",
+      "vvcrl/ppo.py": "a38265161d2bf45c703c5150ef643bb470c895a602bd0b828b461e9a0b550d88",
+      "vvcrl/train.py": "bcc41be51822742e6f8fff51abc7fc31faa74f3aad147e78988dab5b38ae11c9",
+      "vvcrl/engine.py": "38da2971a7612323a14d19085433359a2c9be0adf417f67e7b0cffc64e66ef79",
+      "native/online_manifest.json": "eec63d72de97f89a4b6a560bd8ea4d0f6d65aff77c8a7d41d3098a40bbcb25ac",
+      "vvcrl/locked/assets/dataset_lock.json": "f7a600f501de622f66ace04bb0b12ec5da0dab988cd54732d614f6b16495aaea"
+    },
+    "real_bdd100k_policy_learning": {
+      "status": "NOT_RUN",
+      "ready_for_full_training": false,
+      "reason": "No local locked MOV source, YOLO weights or CUDA. CPU toy/native fixtures cannot establish better F1 than QPA."
+    },
+    "next_required": "Fresh exact-source real-data preflight; then controlled mini only. Keep metric/cap/split and compare QPA/ROI/frozen V2. No old checkpoint or gate migration."
+  }
 }
