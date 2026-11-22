@@ -69,7 +69,7 @@ class PPO:
                   'return_mean':float(np.mean(ret)),'return_std':float(np.std(ret)),
                   'td_error_mean':float(np.mean(td_error)),'td_error_std':float(np.std(td_error)),
                   'critic_explained_variance':(float(1-np.var(ret-old_values)/variance) if variance>1e-12 else None),
-                  'terminal_rate_reward_nonzero':int(np.count_nonzero(rewards[done]))}
+                  'terminal_total_reward_nonzero':int(np.count_nonzero(rewards[done]))}
         adv=torch.as_tensor(adv);ret=torch.as_tensor(ret)
         adv=(adv-adv.mean())/(adv.std(unbiased=False)+1e-8)
         target=torch.as_tensor(batch['aux_target'],dtype=torch.float32);weight=torch.as_tensor(batch['aux_weight'],dtype=torch.float32)
