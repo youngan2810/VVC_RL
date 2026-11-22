@@ -23,6 +23,16 @@ The notebook defaults to **preflight only**. It builds vanilla and instrumented 
 
 The current preflight notebook pins the semantic-region runtime and offers **40 additional mini updates = 80 train clips = 20,480 transitions**. State, reward, bitrate tolerance, GAE lambda, LR, losses, seed and dataset stay fixed; the controlled change for this ablation is video interleaving; the existing semantic-region policy stays fixed. The other mini launchers are historical V1/V2 independent-CTU notebooks pinned to their original commits. They cannot launch or authorize this policy. Use the current preflight entry point for a fresh experiment; no old preflight/checkpoint is silently migrated.
 
+**Three controlled experiments on the same source and locked Train/Validation split:**
+
+| Experiment | Train schedule | Gamma | GAE lambda | Kaggle output |
+| --- | --- | --- | --- | --- |
+| A | blocked (original order) | 1.0 | 0.95 | `vvc_rl_mini_A` |
+| B | mixed (distinct videos per update) | 1.0 | 0.95 | `vvc_rl_mini_B` |
+| C | mixed (distinct videos per update) | 1.0 | 1.0 | `vvc_rl_mini_C` |
+
+The existing Kaggle notebook defaults to B with training disabled. Change `EXPERIMENT` before the preflight to select A or C. Each needs a fresh configuration-bound preflight; outputs and SAFE archives use distinct names. A here means a **fresh blocked-order control run**, not the historical already-trained checkpoint. Preserve old outputs. `--gamma 1 --gae-lambda {0.95|1.0} --train-schedule {blocked|mixed}` must match for preflight, training, checkpoint loading, and diagnosis. A checkpoint from B is rejected under C, and vice versa. These are ablations, not claims of a better F1; lambda=1 may increase variance/value gradients.
+
 Mini training requires both an intact `PASS_READY_FOR_MINI` report bound to the same source/profile/binaries/environment and an explicit `RUN_MINI_TRAINING=True`. No long training is started automatically. A passing preflight does not claim useful learning.
 
 ## Commands
