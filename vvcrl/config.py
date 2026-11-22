@@ -1,5 +1,5 @@
 from dataclasses import dataclass, asdict
-import hashlib,json
+import hashlib,json,math
 from pathlib import Path
 
 SCHEMA='vvc-rl-qpa-ppo/3'
@@ -34,6 +34,14 @@ class PPOConfig:
     max_grad:float=.5
     target_kl:float=.05
     reward_scale:float=100.
+    def validate(self):
+        if not all(math.isfinite(float(v)) for v in asdict(self).values()):
+            raise ValueError('PPO configuration must be finite')
+        if self.gamma!=1.0 or self.gae_lambda not in (0.95,1.0):
+            raise ValueError('Locked experiment supports gamma=1 and GAE lambda in {0.95, 1.0}')
+        if self.learning_rate<=0 or self.epochs<1 or self.minibatch<1 or not 0<self.clip<1 or self.max_grad<=0 or self.target_kl<=0 or self.reward_scale<=0:
+            raise ValueError('Invalid PPO optimizer configuration')
+        return self
 
 @dataclass(frozen=True)
 class Profile:

@@ -1,4 +1,6 @@
 import io,json,tempfile,unittest,zipfile,subprocess,os
+from unittest.mock import patch
+from dataclasses import asdict
 from pathlib import Path
 import numpy as np
 import torch
@@ -9,7 +11,7 @@ from vvcrl.ppo import PPO,gae
 from vvcrl.metrics import task
 from vvcrl.reward import reward,RatePrices
 from vvcrl.artifacts import export_run,import_run
-from vvcrl.gates import MANDATORY,write_gate,require_gate
+from vvcrl.gates import MANDATORY,write_gate,require_gate,binding
 from vvcrl.train import save_checkpoint,load_checkpoint,mixed_train_schedule
 from vvcrl.locked.data import ASSETS,DATASET_SHA
 from vvcrl.controls import roi_action
@@ -92,13 +94,74 @@ class ActionPPOTests(unittest.TestCase):
         np.testing.assert_equal(r,[3,2,7,4])
     def test_gae_bootstrap(self):
         a,r=gae([1],[2],[False],gamma=.9,last_value=3);self.assertAlmostEqual(float(r[0]),3.7,places=5)
+    def test_lambda_one_exact_complete_clip_returns(self):
+        rewards=np.array([.5,0,1.25,-.75,2.],np.float32)
+        values=np.array([.1,-.4,.3,.2,-.1],np.float32)
+        advantage,returns=gae(rewards,values,[False]*4+[True],gamma=1.,lam=1.)
+        future=np.cumsum(rewards[::-1])[::-1]
+        np.testing.assert_allclose(returns,future,rtol=0,atol=1e-6)
+        np.testing.assert_allclose(advantage,future-values,rtol=0,atol=1e-6)
+
+    def test_lambda_one_no_cross_clip_credit_or_bootstrap(self):
+        advantage,returns=gae([1,2,4,8],[3,2,1,4],[False,True,False,True],gamma=1.,lam=1.,last_value=999)
+        np.testing.assert_allclose(returns,[3,2,12,8],atol=1e-6)
+        np.testing.assert_allclose(advantage,[0,0,11,4],atol=1e-6)
+
+    def test_terminal_reward_reaches_earlier_action(self):
+        rewards=np.zeros(256,np.float32);rewards[-1]=3.5
+        values=np.zeros(256,np.float32);done=[False]*255+[True]
+        advantage,returns=gae(rewards,values,done,gamma=1.,lam=1.)
+        np.testing.assert_allclose(advantage,np.full(256,3.5),atol=1e-5)
+        np.testing.assert_allclose(returns,np.full(256,3.5),atol=1e-5)
+        shorter,_=gae(rewards,values,done,gamma=1.,lam=.95)
+        self.assertAlmostEqual(float(shorter[0]),3.5*.95**255,places=7)
+
+    def test_ppo_config_variants_and_learning_logs(self):
+        self.assertEqual(PPOConfig(gae_lambda=.95).validate().gamma,1.)
+        self.assertEqual(PPOConfig(gae_lambda=1.).validate().gae_lambda,1.)
+        for invalid in (PPOConfig(gamma=.99),PPOConfig(gae_lambda=.98),PPOConfig(gae_lambda=float('nan'))):
+            with self.assertRaises(ValueError):invalid.validate()
+        ppo=PPO(self.m,PPOConfig(gae_lambda=1.))
+        stats=ppo.update(batch(self.m,16))
+        diag=stats['learning_diagnostics']
+        self.assertEqual(diag['ppo_config']['gae_lambda'],1.)
+        self.assertIn('critic_explained_variance',diag)
+        for key in ('advantage_raw_std','return_std','td_error_std'):self.assertTrue(np.isfinite(diag[key]))
+        for name in ('roi','background'):
+            head=diag['head_behavior_before_update'][name]
+            self.assertGreater(head['active_frames'],0)
+            self.assertAlmostEqual(sum(head['mean_probabilities']),1.,places=5)
+            self.assertEqual(len(head['std_probabilities_across_states']),5)
+
+    def test_ppo_transition_signals_are_saved_and_reconstructable(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'diagnostics.npz'
+            cfg=PPOConfig(gamma=1.,gae_lambda=1.)
+            data=batch(self.m,16);stats=PPO(self.m,cfg).update(data,diagnostics_path=p)
+            self.assertEqual(stats['learning_diagnostics']['transition_signals_file'],p.name)
+            with np.load(p,allow_pickle=False) as z:
+                advantage,returns=gae(data['reward'],data['value'],data['done'],1.,1.)
+                np.testing.assert_allclose(z['advantage_raw'],advantage)
+                np.testing.assert_allclose(z['returns'],returns)
+                self.assertEqual(z['factor_probabilities'].shape,(16,2,5))
+                self.assertEqual(z['factor_actions'].shape,(16,2))
+                self.assertEqual(z['factor_active'].shape,(16,2))
+                self.assertEqual(z['td_error'].shape,(16,))
+
     def test_checkpoint_exact_reload(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'model.pt';ppo=PPO(self.m);ppo.update(batch(self.m));prices=RatePrices()
-            save_checkpoint(p,self.m,ppo,prices,1,2,{'source':'test'},0.,7)
-            restored=ActorCritic();c=load_checkpoint(p,restored,PPO(restored),{'source':'test'})
+            bind={'source':'test','ppo':asdict(ppo.config),'train_schedule':'mixed'}
+            save_checkpoint(p,self.m,ppo,prices,1,2,bind,0.,7)
+            restored=ActorCritic();c=load_checkpoint(p,restored,PPO(restored),bind)
             self.assertEqual(c['episodes'],2);self.assertEqual(model_hash(self.m),model_hash(restored))
-            with self.assertRaises(ValueError):load_checkpoint(p,restored,PPO(restored),{'source':'changed'})
+            with self.assertRaises(ValueError):load_checkpoint(p,restored,PPO(restored),dict(bind,source='changed'))
+            with self.assertRaises(ValueError):load_checkpoint(p,restored,PPO(restored),dict(bind,train_schedule='blocked'))
+            other=ActorCritic();other_ppo=PPO(other,PPOConfig(gae_lambda=1.0))
+            with self.assertRaisesRegex(ValueError,'PPO/GAE'):
+                load_checkpoint(p,other,other_ppo,dict(bind,ppo=asdict(other_ppo.config)))
+            with self.assertRaisesRegex(ValueError,'PPO config'):
+                save_checkpoint(p,self.m,other_ppo,prices,1,2,bind,0.,7)
 
 class StateTests(unittest.TestCase):
     def setUp(self):
@@ -140,9 +203,35 @@ class RewardTests(unittest.TestCase):
         self.assertAlmostEqual(sum(r['raw'] for r in rows),.1-2*1600/128000)
     def test_rate_price_moves_with_budget(self):
         p=RatePrices();p.update([dict(rate=120,bits=200,budget=100,anchor_bits=100/1.02)]);self.assertAlmostEqual(p.values['120'],1.05)
+    def test_budget_penalty_occurs_once_at_clip_end(self):
+        config=RewardConfig()
+        rows=[reward(.7,.7,300,200,4,1000,1.,terminal=(i==3),total_bits=1200 if i==3 else None,
+                     anchor_total_bits=800 if i==3 else None,config=config) for i in range(4)]
+        self.assertEqual(sum(x['bit_component']!=0 for x in rows),1)
+        self.assertTrue(all(x['bit_component']==0 for x in rows[:3]))
+        self.assertAlmostEqual(sum(x['raw'] for x in rows),-(1200-1.02*800)/1000)
+        self.assertAlmostEqual(sum(x['train'] for x in rows),100*sum(x['raw'] for x in rows))
+
     def test_validation_cannot_change_prices(self):
         with self.assertRaises(ValueError):RatePrices().update([],training=False)
     def test_noop_reward_exact_zero(self):self.assertEqual(reward(.2,.2,800,800,32,128000,1)['raw'],0)
+
+class ConfigBindingTests(unittest.TestCase):
+    def test_preflight_binding_follows_actual_gae_and_schedule(self):
+        tools={'encoder':'e','vanilla':'v','decoder':'d'}
+        with patch('vvcrl.gates.fingerprint',return_value='source'),patch('vvcrl.gates.digest',return_value='binary'):
+            a=binding('.',tools,Profile(),ppo_config=PPOConfig(gae_lambda=.95),train_schedule='blocked')
+            b=binding('.',tools,Profile(),ppo_config=PPOConfig(gae_lambda=.95),train_schedule='mixed')
+            c=binding('.',tools,Profile(),ppo_config=PPOConfig(gae_lambda=1.),train_schedule='mixed')
+        self.assertNotEqual(a,b);self.assertNotEqual(b,c)
+        self.assertEqual(c['ppo']['gae_lambda'],1.)
+        self.assertEqual(c['train_schedule'],'mixed')
+        with tempfile.TemporaryDirectory() as d:
+            proof=Path(d)/'proof.txt';proof.write_text('checked')
+            write_gate(d,c,dict.fromkeys(MANDATORY,True),[proof])
+            require_gate(d,c)
+            for wrong in (a,b):
+                with self.assertRaises(RuntimeError):require_gate(d,wrong)
 
 class MiniScheduleTests(unittest.TestCase):
     def setUp(self):

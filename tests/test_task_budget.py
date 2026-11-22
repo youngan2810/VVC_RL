@@ -1,9 +1,10 @@
 """Behavioral regressions for the measured V1 failure, not reward mirrors."""
 import copy,json,tempfile,unittest
+from dataclasses import asdict
 from pathlib import Path
 import numpy as np
 import torch
-from vvcrl.config import RewardConfig,digest,atomic_json
+from vvcrl.config import PPOConfig,RewardConfig,digest,atomic_json
 from vvcrl.reward import reward,clip_objective,bitrate_cap,RatePrices
 from vvcrl.validation import validation_summary
 from vvcrl.model import ActorCritic,model_hash
@@ -63,10 +64,10 @@ class TaskBudgetTests(unittest.TestCase):
         self.assertEqual(before,p.state())
     def test_checkpoint_cannot_resume_another_objective(self):
         with tempfile.TemporaryDirectory() as d:
-            m=ActorCritic();p=Path(d)/'model.pt';bind={'reward':{'version':'paired-linear-v1'}}
+            m=ActorCritic();p=Path(d)/'model.pt';bind={'reward':{'version':'paired-linear-v1'},'ppo':asdict(PPOConfig()),'train_schedule':'mixed'}
             save_checkpoint(p,m,PPO(m),RatePrices(),40,80,bind,0,20261120)
             restored=ActorCritic();before=model_hash(restored)
-            with self.assertRaisesRegex(ValueError,'frozen controls'):load_checkpoint(p,restored,PPO(restored),{'reward':{'version':'task-budget-v2'}})
+            with self.assertRaisesRegex(ValueError,'PPO/GAE/schedule'):load_checkpoint(p,restored,PPO(restored),dict(bind,reward={'version':'task-budget-v2'}))
             self.assertEqual(before,model_hash(restored))
     def test_legacy_schema_rejected_before_loading_weights(self):
         with tempfile.TemporaryDirectory() as d:

@@ -12,13 +12,20 @@ def verify(root=ROOT):
         for node in tree.body:
             if isinstance(node,ast.Assign):
                 for target in node.targets:
-                    if isinstance(target,ast.Name) and target.id in ('EXPECTED_SOURCE_SHA256','RUN_MINI_TRAINING','SOURCE_COMMIT','REWARD_VERSION'):assignments[target.id]=ast.literal_eval(node.value)
+                    if isinstance(target,ast.Name) and target.id in ('EXPECTED_SOURCE_SHA256','RUN_MINI_TRAINING','SOURCE_COMMIT','REWARD_VERSION','EXPERIMENT','GAE_GAMMA'):assignments[target.id]=ast.literal_eval(node.value)
     commit=assignments.get('SOURCE_COMMIT','')
     if len(commit)!=40 or any(c not in '0123456789abcdef' for c in commit):raise ValueError('Notebook requires an exact source commit')
     if assignments.get('REWARD_VERSION')!='task-budget-v2':raise ValueError('Current notebook must default to V2 reward')
     actual=fingerprint(root)
     if assignments.get('EXPECTED_SOURCE_SHA256')!=actual:raise ValueError('Published notebook pin differs from this host source fingerprint')
     if assignments.get('RUN_MINI_TRAINING') is not False:raise ValueError('Distributed notebook must default to preflight only')
+    if assignments.get('EXPERIMENT')!='B' or assignments.get('GAE_GAMMA')!=1.0:
+        raise ValueError('Distributed notebook must default to B with gamma=1')
+    code='\n'.join(cell['source'] for cell in notebook['cells'] if cell['cell_type']=='code')
+    if code.count("'--gae-lambda',GAE_LAMBDA")!=2 or code.count("'--train-schedule',TRAIN_SCHEDULE")!=2:
+        raise ValueError('Both preflight and training must pass the selected PPO/schedule settings')
+    if "EXPERIMENT_SPECS={'A':('blocked',.95),'B':('mixed',.95),'C':('mixed',1.0)}" not in code:
+        raise ValueError('Notebook A/B/C settings are not correctly declared')
     report=json.loads((root/'docs/VERIFICATION.json').read_text(encoding='utf-8'))
     if report['functional_source_sha256']!=actual:raise ValueError('Verification report/source binding differs')
     print('NOTEBOOK_SOURCE_PIN_PASS',actual,flush=True);return actual
