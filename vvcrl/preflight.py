@@ -12,9 +12,9 @@ from .gates import MANDATORY,binding,write_gate
 from .native_smoke import run_smoke
 from .artifacts import export_run
 
-def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),workers=2,seed=20261120,reward_config=RewardConfig()):
+def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),workers=2,seed=20261120,reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed'):
     root=Path(root);output=Path(output);output.mkdir(parents=True,exist_ok=False);checks={k:False for k in MANDATORY}
-    bind=binding(root,toolchain,profile,workers,reward_config);evidence=[]
+    bind=binding(root,toolchain,profile,workers,reward_config,ppo_config,train_schedule);evidence=[]
     try:
         if workers!=2 or not torch.cuda.is_available() or torch.cuda.device_count()<2:raise RuntimeError('Full Kaggle preflight requires two real CUDA collectors; CPU fixture cannot authorize training')
         unit=output/'unit_contracts.log'
@@ -25,7 +25,7 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         from .locked.pixels import verify_conversion
         atomic_json(output/'RGB_PROTOCOL.json',verify_conversion());checks['rgb_protocol']=True
         native=run_smoke(toolchain,output/'native_smoke');checks.update(native['checks'])
-        torch.set_num_threads(1);torch.manual_seed(seed);model=ActorCritic();ppo=PPO(model)
+        torch.set_num_threads(1);torch.manual_seed(seed);model=ActorCritic();ppo=PPO(model,ppo_config)
         snapshot=output/'collector_initial.pt';torch.save({'model':model.state_dict()},snapshot)
         catalog=VideoCatalog(input_root,mode='mini',seed=20261111)
         catalog.check_available(('train','val'))
@@ -43,8 +43,8 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         checks['actor_head_updated']=stats['actor_head_change']>0 and stats['policy_head_gradient_norm']>0
         checks['critic_head_updated']=stats['critic_head_change']>0
         checks['reward_identity']=all(r['result']['reward_identity_error']<1e-10 for r in train)
-        atomic_json(output/'PPO_MECHANICAL_UPDATE.json',{'before':before,'after':model_hash(model),'stats':stats,'scope':'one train-only update; not evidence of useful policy'})
-        after=output/'mechanical_checkpoint.pt';torch.save({'model':model.state_dict(),'optimizer':ppo.optimizer.state_dict(),'config':asdict(PPOConfig())},after)
+        atomic_json(output/'PPO_MECHANICAL_UPDATE.json',{'before':before,'after':model_hash(model),'stats':stats,'ppo_config':asdict(ppo_config),'train_schedule':train_schedule,'scope':'one train-only update; not evidence of useful policy'})
+        after=output/'mechanical_checkpoint.pt';torch.save({'model':model.state_dict(),'optimizer':ppo.optimizer.state_dict(),'config':asdict(ppo_config)},after)
         restored=ActorCritic();restored.load_state_dict(torch.load(after,map_location='cpu',weights_only=True)['model']);checks['checkpoint_reload']=model_hash(restored)==model_hash(model)
         val_before=model_hash(model)
         val=collect(specs(catalog.selected['val'][:1],'val',after,model,'validation_no_update'))
@@ -59,4 +59,4 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
     except BaseException as e:
         atomic_json(output/'FAILURE.json',{'type':type(e).__name__,'message':str(e),'training_blocked':True})
         write_gate(output,bind,checks,[p for p in evidence if p.exists()]);raise
-    finally:export_run(output)
+    finally:export_run(output,output.parent/f'VVC_RL_PREFLIGHT_{output.name}_SAFE.zip')

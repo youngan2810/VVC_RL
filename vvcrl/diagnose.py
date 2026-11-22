@@ -2,7 +2,7 @@
 from pathlib import Path
 from dataclasses import asdict
 import json,torch,uuid
-from .config import Profile,RewardConfig,atomic_json
+from .config import Profile,RewardConfig,PPOConfig,atomic_json
 from .gates import binding,require_gate
 from .model import ActorCritic,model_hash
 from .train import load_checkpoint
@@ -11,9 +11,9 @@ from .locked.data import VideoCatalog
 from .collect import collect
 from .artifacts import export_run
 
-def diagnose(root,output,gate,toolchain,input_root,tools,checkpoint,profile=Profile(),reward_config=RewardConfig()):
-    output=Path(output);output.mkdir(parents=True,exist_ok=False);bind=binding(root,toolchain,profile,reward_config=reward_config);require_gate(gate,bind)
-    torch.set_num_threads(1);model=ActorCritic();state=load_checkpoint(checkpoint,model,PPO(model),bind);before=model_hash(model)
+def diagnose(root,output,gate,toolchain,input_root,tools,checkpoint,profile=Profile(),reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed'):
+    output=Path(output);output.mkdir(parents=True,exist_ok=False);bind=binding(root,toolchain,profile,reward_config=reward_config,ppo_config=ppo_config,train_schedule=train_schedule);require_gate(gate,bind)
+    torch.set_num_threads(1);model=ActorCritic();state=load_checkpoint(checkpoint,model,PPO(model,ppo_config),bind);before=model_hash(model)
     catalog=VideoCatalog(input_root,mode='mini',seed=20261111);rows={};token=uuid.uuid4().hex[:8]
     try:
         for control in ('ppo','random','fixed_m2','fixed_p2','roi_protect','roi_redistribute'):

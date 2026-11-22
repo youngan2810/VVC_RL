@@ -49,21 +49,21 @@ def load_checkpoint(path,model,ppo,expected):
     if model_hash(model)!=c['model_sha256']:raise ValueError('Checkpoint weight identity differs')
     torch.set_rng_state(c['torch_rng']);return c
 
-def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val_every=5,profile=Profile(),seed=20261120,resume=None,authorized=False,hours=10.,reward_config=RewardConfig()):
+def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val_every=5,profile=Profile(),seed=20261120,resume=None,authorized=False,hours=10.,reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed'):
     if not authorized:raise RuntimeError('Training disabled: explicitly pass --start-mini-training after reviewing full preflight')
-    root=Path(root);output=Path(output);bind=binding(root,toolchain,profile,2,reward_config);require_gate(preflight,bind)
+    root=Path(root);output=Path(output);bind=binding(root,toolchain,profile,2,reward_config,ppo_config,train_schedule);require_gate(preflight,bind)
     if not 1<=updates or val_every<1:raise ValueError('Invalid update budget')
     output.mkdir(parents=True,exist_ok=True);protocol=output/'TRAIN_BINDING.json'
     if (output/'checkpoints/latest.pt').exists() and not resume:raise ValueError('Existing training checkpoint: explicitly resume instead of restarting')
     invocation=uuid.uuid4().hex[:12]
     if protocol.exists() and json.loads(protocol.read_text())!=bind:raise ValueError('Output contains a different experiment')
     atomic_json(protocol,bind);torch.set_num_threads(1);torch.manual_seed(seed)
-    model=ActorCritic();ppo=PPO(model);prices=RatePrices();iteration=episodes=0;best=0.
+    model=ActorCritic();ppo=PPO(model,ppo_config);prices=RatePrices();iteration=episodes=0;best=0.
     if resume:
         state=load_checkpoint(resume,model,ppo,bind);iteration=state['iteration'];episodes=state['episodes'];seed=state['seed'];best=state['best_validation']
         prices=RatePrices(**state['prices'])
     catalog=VideoCatalog(input_root,mode='mini',seed=20261111);catalog.check_available(('train','val'))
-    schedule=mixed_train_schedule(catalog.selected['train'],seed=seed)
+    schedule=mixed_train_schedule(catalog.selected['train'],seed=seed) if train_schedule=='mixed' else list(itertools.product(catalog.selected['train'],RATES))
     if episodes<0 or iteration*2!=episodes or episodes+2*updates>len(schedule):
         raise ValueError('Mini schedule/resume exceeds the unique 40-update train budget')
     deadline=time.monotonic()+hours*3600
@@ -82,7 +82,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
             stats=ppo.update(load_batches(rows));episodes+=2;iteration+=1
             prices.update([r['result'] for r in rows],training=True,config=reward_config)
             atomic_json(output/'updates'/f'{iteration:06}.json',{'iteration':iteration,'episodes':episodes,'stats':stats,'prices':prices.state(),'rollout_diagnostics':rollout_summary(rows),
-              'schedule_mode':'seeded_video_interleaving_v1','completed':[{'video':r['video'],'rate':r['result']['rate'],'bits':r['result']['bits'],'budget':r['result']['budget'],'quality':r['result']['task_retention_f1_v2']} for r in rows]})
+              'schedule_mode':train_schedule,'ppo_config':asdict(ppo_config),'completed':[{'video':r['video'],'rate':r['result']['rate'],'bits':r['result']['bits'],'budget':r['result']['budget'],'quality':r['result']['task_retention_f1_v2']} for r in rows]})
             latest=output/'checkpoints/latest.pt';save_checkpoint(latest,model,ppo,prices,iteration,episodes,bind,best,seed)
             atomic_json(output/'PROGRESS.json',{'iteration':iteration,'episodes':episodes,'checkpoint':'checkpoints/latest.pt','best_validation_gain':best,'checkpoint_sha256':digest(latest)})
             if iteration%val_every==0 and time.monotonic()<deadline-900:
@@ -100,7 +100,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
                     best=score;save_checkpoint(output/'checkpoints/best_validation.pt',model,ppo,prices,iteration,episodes,bind,best,seed)
                 save_checkpoint(latest,model,ppo,prices,iteration,episodes,bind,best,seed)
             atomic_json(output/'PROGRESS.json',{'iteration':iteration,'episodes':episodes,'checkpoint':'checkpoints/latest.pt','best_validation_gain':best,'checkpoint_sha256':digest(latest)})
-            export_run(output,output.parent/'VVC_RL_MINI_TRAIN_KAGGLE_SAFE.zip')
+            export_run(output,output.parent/f'VVC_RL_MINI_{output.name}_SAFE.zip')
             print('MINI_UPDATE_COMPLETE',iteration,episodes,stats,flush=True)
         return {'iteration':iteration,'episodes':episodes,'best_validation_gain':best}
-    finally:export_run(output,output.parent/'VVC_RL_MINI_TRAIN_KAGGLE_SAFE.zip')
+    finally:export_run(output,output.parent/f'VVC_RL_MINI_{output.name}_SAFE.zip')

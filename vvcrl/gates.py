@@ -11,9 +11,10 @@ MANDATORY=('unit_contracts','rgb_protocol','native_noop_parity','all_five_intege
  'logprob_value_replay','actor_head_updated','critic_head_updated','reward_identity','validation_no_update','checkpoint_reload')
 
 def environment():return {'python':platform.python_version(),'torch':str(torch.__version__),'numpy':np.__version__}
-def binding(root,toolchain,profile,workers=2,reward_config=RewardConfig()):
-    reward_config.validate()
-    return {'schema':SCHEMA,'task':TASK,'source_sha256':fingerprint(root),'profile':asdict(profile),'ppo':asdict(PPOConfig()),'reward':asdict(reward_config),'detector':DETECTOR_ID,
+def binding(root,toolchain,profile,workers=2,reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed'):
+    reward_config.validate();ppo_config.validate()
+    if train_schedule not in ('blocked','mixed'):raise ValueError('Unknown training schedule')
+    return {'schema':SCHEMA,'task':TASK,'source_sha256':fingerprint(root),'profile':asdict(profile),'ppo':asdict(ppo_config),'train_schedule':train_schedule,'reward':asdict(reward_config),'detector':DETECTOR_ID,
       'binary_sha256':{k:digest(toolchain[k]) for k in ('encoder','vanilla','decoder')},'workers':workers,'environment':environment()}
 def write_gate(folder,bind,checks,evidence):
     folder=Path(folder)
