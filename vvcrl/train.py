@@ -13,6 +13,26 @@ from .collect import collect,load_batches
 from .gates import binding,require_gate
 from .artifacts import export_run
 
+def mixed_train_schedule(videos,rates=RATES,*,seed=20261120):
+    """Deterministic seeded interleaving: one video per round and every video/rate once.
+
+    Each round spans all source videos; adjacent collector pairs cannot share a
+    video. Use a private NumPy RNG so Actor/Critic initialization and PPO RNG
+    remain exactly as in the blocked-order baseline.
+    """
+    videos=tuple(videos);rates=tuple(rates)
+    if len(videos)<2 or len(videos)%2 or len(set(videos))!=len(videos):
+        raise ValueError('Mini schedule requires an even number of distinct videos')
+    if not rates or len(set(rates))!=len(rates):
+        raise ValueError('Mini schedule requires distinct bitrate levels')
+    rng=np.random.default_rng(seed)
+    schedule=[]
+    for round_index in range(len(rates)):
+        for index in rng.permutation(len(videos)):
+            i=int(index)
+            schedule.append((videos[i],rates[(i+round_index)%len(rates)]))
+    return schedule
+
 def save_checkpoint(path,model,ppo,prices,iteration,episodes,bind,best,seed):
     p=Path(path);p.parent.mkdir(parents=True,exist_ok=True);tmp=p.with_name(p.name+'.tmp')
     torch.save({'schema':'vvc-rl-checkpoint/2','model':model.state_dict(),'optimizer':ppo.optimizer.state_dict(),
@@ -43,7 +63,10 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
         state=load_checkpoint(resume,model,ppo,bind);iteration=state['iteration'];episodes=state['episodes'];seed=state['seed'];best=state['best_validation']
         prices=RatePrices(**state['prices'])
     catalog=VideoCatalog(input_root,mode='mini',seed=20261111);catalog.check_available(('train','val'))
-    schedule=list(itertools.product(catalog.selected['train'],RATES));deadline=time.monotonic()+hours*3600
+    schedule=mixed_train_schedule(catalog.selected['train'],seed=seed)
+    if episodes<0 or iteration*2!=episodes or episodes+2*updates>len(schedule):
+        raise ValueError('Mini schedule/resume exceeds the unique 40-update train budget')
+    deadline=time.monotonic()+hours*3600
     def specs(items,split,snapshot,tag):
         return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
           snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),video=v,split=split,rate=r,price=prices.values[str(r)],
@@ -54,12 +77,12 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
             # Collect complete clips with fixed weights/prices; no off-policy reuse.
             snapshot=output/'snapshots'/f'collector_{iteration:06}.pt';snapshot.parent.mkdir(exist_ok=True)
             torch.save({'model':model.state_dict()},snapshot)
-            items=[schedule[(episodes+i)%len(schedule)] for i in range(2)]
+            items=schedule[episodes:episodes+2]  # Two distinct videos; no wrap or replay
             rows=collect(specs(items,'train',snapshot,f'train_update{iteration:06}'))
             stats=ppo.update(load_batches(rows));episodes+=2;iteration+=1
             prices.update([r['result'] for r in rows],training=True,config=reward_config)
             atomic_json(output/'updates'/f'{iteration:06}.json',{'iteration':iteration,'episodes':episodes,'stats':stats,'prices':prices.state(),'rollout_diagnostics':rollout_summary(rows),
-              'completed':[{'video':r['video'],'rate':r['result']['rate'],'bits':r['result']['bits'],'budget':r['result']['budget'],'quality':r['result']['task_retention_f1_v2']} for r in rows]})
+              'schedule_mode':'seeded_video_interleaving_v1','completed':[{'video':r['video'],'rate':r['result']['rate'],'bits':r['result']['bits'],'budget':r['result']['budget'],'quality':r['result']['task_retention_f1_v2']} for r in rows]})
             latest=output/'checkpoints/latest.pt';save_checkpoint(latest,model,ppo,prices,iteration,episodes,bind,best,seed)
             atomic_json(output/'PROGRESS.json',{'iteration':iteration,'episodes':episodes,'checkpoint':'checkpoints/latest.pt','best_validation_gain':best,'checkpoint_sha256':digest(latest)})
             if iteration%val_every==0 and time.monotonic()<deadline-900:

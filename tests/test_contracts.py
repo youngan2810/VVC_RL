@@ -10,7 +10,7 @@ from vvcrl.metrics import task
 from vvcrl.reward import reward,RatePrices
 from vvcrl.artifacts import export_run,import_run
 from vvcrl.gates import MANDATORY,write_gate,require_gate
-from vvcrl.train import save_checkpoint,load_checkpoint
+from vvcrl.train import save_checkpoint,load_checkpoint,mixed_train_schedule
 from vvcrl.locked.data import ASSETS,DATASET_SHA
 from vvcrl.controls import roi_action
 from vvcrl.repository import verify_checkout
@@ -143,6 +143,40 @@ class RewardTests(unittest.TestCase):
     def test_validation_cannot_change_prices(self):
         with self.assertRaises(ValueError):RatePrices().update([],training=False)
     def test_noop_reward_exact_zero(self):self.assertEqual(reward(.2,.2,800,800,32,128000,1)['raw'],0)
+
+class MiniScheduleTests(unittest.TestCase):
+    def setUp(self):
+        self.videos=tuple(f'video_{i:02d}' for i in range(16))
+        self.rates=(50,80,120,160,200)
+
+    def test_exact_coverage_and_cross_video_pairs(self):
+        schedule=mixed_train_schedule(self.videos,self.rates,seed=20261120)
+        self.assertEqual(len(schedule),80)
+        self.assertEqual(set(schedule),{(v,r) for v in self.videos for r in self.rates})
+        self.assertEqual(len(set(schedule)),len(schedule))
+        for i in range(0,len(schedule),2):
+            self.assertNotEqual(schedule[i][0],schedule[i+1][0])
+        for i in range(0,len(schedule),len(self.videos)):
+            self.assertEqual({v for v,_ in schedule[i:i+len(self.videos)]},set(self.videos))
+
+    def test_seeded_resume_same_pairs_without_rng_side_effects(self):
+        before=torch.get_rng_state().clone()
+        schedule=mixed_train_schedule(self.videos,self.rates,seed=20261120)
+        self.assertTrue(torch.equal(before,torch.get_rng_state()))
+        self.assertEqual(schedule,mixed_train_schedule(self.videos,self.rates,seed=20261120))
+        self.assertNotEqual(schedule,mixed_train_schedule(self.videos,self.rates,seed=20261121))
+        first_10_updates=schedule[:20]
+        resumed_30_updates=mixed_train_schedule(self.videos,self.rates,seed=20261120)[20:]
+        self.assertEqual(first_10_updates+resumed_30_updates,schedule)
+
+    def test_invalid_catalogue_rejected(self):
+        for bad in ((),('one',),('one','one'),('a','b','c')):
+            with self.subTest(videos=bad),self.assertRaises(ValueError):
+                mixed_train_schedule(bad,self.rates,seed=1)
+        with self.assertRaises(ValueError):
+            mixed_train_schedule(('a','b'),(),seed=1)
+        with self.assertRaises(ValueError):
+            mixed_train_schedule(('a','b'),(50,50),seed=1)
 
 class EvidenceTests(unittest.TestCase):
     def test_fingerprint_uses_portable_case_sensitive_path_order(self):
