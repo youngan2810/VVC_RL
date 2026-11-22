@@ -1,4 +1,5 @@
 from dataclasses import asdict
+from pathlib import Path
 import numpy as np
 import torch
 from .config import PPOConfig
@@ -51,13 +52,14 @@ def policy_state_diagnostics(model,batch):
 class PPO:
     def __init__(self,model,config=PPOConfig()):
         config.validate();self.model,self.config=model,config;self.optimizer=torch.optim.Adam(model.parameters(),lr=config.learning_rate)
-    def update(self,batch):
+    def update(self,batch,diagnostics_path=None):
         c=self.config;m=self.model
         if len(batch['done'])<2 or not batch['done'][-1]:raise ValueError('Update requires complete finite clips')
         if np.asarray(batch['actions']).dtype.kind not in 'iu':raise ValueError('PPO requires original categorical integer indices, never rounded actions')
         x=torch.as_tensor(batch['x'],dtype=torch.float32);g=torch.as_tensor(batch['g'],dtype=torch.float32)
         a=torch.as_tensor(batch['actions'],dtype=torch.long);old_log=torch.as_tensor(batch['log_prob'],dtype=torch.float32)
         adv,ret=gae(batch['reward'],batch['value'],batch['done'],c.gamma,c.gae_lambda)
+        raw_advantage=adv.copy();raw_returns=ret.copy()
         old_values=np.asarray(batch['value'],dtype=np.float32)
         rewards=np.asarray(batch['reward'],dtype=np.float32)
         done=np.asarray(batch['done'],dtype=bool)
@@ -78,6 +80,9 @@ class PPO:
             replay_error=float((replay['log_prob']-old_log).abs().max())
             value_error=float((replay['value']-torch.as_tensor(batch['value'])).abs().max())
             learning['head_behavior_before_update']=head_diagnostics(replay)
+            factor_probabilities=replay['factor_logits'].softmax(-1).cpu().numpy()
+            factor_actions=replay['factor_actions'].cpu().numpy()
+            factor_active=replay['active_factors'].cpu().numpy()
         if replay_error>2e-5 or value_error>2e-5:raise ValueError('Collector policy/value differs from optimizer before update')
         before_actor=m.actor.weight.detach().clone();before_critic=m.critic[-1].weight.detach().clone();metrics=[];stopped=False
         for epoch in range(c.epochs):
@@ -102,6 +107,14 @@ class PPO:
         stats={k:float(np.mean([r[k] for r in metrics])) for k in metrics[0]}
         stats.update(optimizer_steps=len(metrics),early_stop=stopped,replay_logprob_error=replay_error,replay_value_error=value_error,
           actor_head_change=float((m.actor.weight-before_actor).abs().max().detach()),critic_head_change=float((m.critic[-1].weight-before_critic).abs().max().detach()),learning_diagnostics=learning)
+        if diagnostics_path is not None:
+            path=Path(diagnostics_path);path.parent.mkdir(parents=True,exist_ok=True)
+            # Saved in Kaggle run artifacts, never in the repository or Test split.
+            np.savez_compressed(path,advantage_raw=raw_advantage,returns=raw_returns,
+                td_error=td_error,reward=rewards,done=done,
+                factor_probabilities=factor_probabilities,factor_actions=factor_actions,
+                factor_active=factor_active)
+            stats['learning_diagnostics']['transition_signals_file']=path.name
         return stats
 
 def nn_bce(logits,target):return torch.nn.functional.binary_cross_entropy_with_logits(logits,target,reduction='none')

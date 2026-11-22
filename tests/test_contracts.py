@@ -133,6 +133,21 @@ class ActionPPOTests(unittest.TestCase):
             self.assertAlmostEqual(sum(head['mean_probabilities']),1.,places=5)
             self.assertEqual(len(head['std_probabilities_across_states']),5)
 
+    def test_ppo_transition_signals_are_saved_and_reconstructable(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'diagnostics.npz'
+            cfg=PPOConfig(gamma=1.,gae_lambda=1.)
+            data=batch(self.m,16);stats=PPO(self.m,cfg).update(data,diagnostics_path=p)
+            self.assertEqual(stats['learning_diagnostics']['transition_signals_file'],p.name)
+            with np.load(p,allow_pickle=False) as z:
+                advantage,returns=gae(data['reward'],data['value'],data['done'],1.,1.)
+                np.testing.assert_allclose(z['advantage_raw'],advantage)
+                np.testing.assert_allclose(z['returns'],returns)
+                self.assertEqual(z['factor_probabilities'].shape,(16,2,5))
+                self.assertEqual(z['factor_actions'].shape,(16,2))
+                self.assertEqual(z['factor_active'].shape,(16,2))
+                self.assertEqual(z['td_error'].shape,(16,))
+
     def test_checkpoint_exact_reload(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'model.pt';ppo=PPO(self.m);ppo.update(batch(self.m));prices=RatePrices()

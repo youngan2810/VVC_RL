@@ -84,7 +84,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
             torch.save({'model':model.state_dict()},snapshot)
             items=schedule[episodes:episodes+2]  # Two distinct videos; no wrap or replay
             rows=collect(specs(items,'train',snapshot,f'train_update{iteration:06}'))
-            stats=ppo.update(load_batches(rows));episodes+=2;iteration+=1
+            stats=ppo.update(load_batches(rows),diagnostics_path=output/'updates'/f'{iteration+1:06}_signals.npz');episodes+=2;iteration+=1
             prices.update([r['result'] for r in rows],training=True,config=reward_config)
             atomic_json(output/'updates'/f'{iteration:06}.json',{'iteration':iteration,'episodes':episodes,'stats':stats,'prices':prices.state(),'rollout_diagnostics':rollout_summary(rows),
               'schedule_mode':train_schedule,'ppo_config':asdict(ppo_config),'completed':[{'video':r['video'],'rate':r['result']['rate'],'bits':r['result']['bits'],'budget':r['result']['budget'],'quality':r['result']['task_retention_f1_v2']} for r in rows]})
