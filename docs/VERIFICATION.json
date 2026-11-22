@@ -229,7 +229,7 @@
   },
   "schedule_mix_revision": {
     "date": "2026-11-22",
-    "source_commit": "7183c7653ce45b39fd5b55675a8192e84b729006",
+    "source_commit": "d5c12757213d10846ad72f22ebc645e39d812575",
     "functional_source_sha256": "676d2fb31e29013f41523ddb1bcac7436e6382ee95f52c95539faa4cbd0e6c86",
     "ablation": "Seeded video interleaving only: two distinct Train videos per PPO update across five 16-video rounds, with exact 16x5 pair coverage and unchanged 40-update budget.",
     "cpu_unit_tests": {
