@@ -1,7 +1,7 @@
 {
   "date": "2026-11-22",
-  "scope": "Current mixed-schedule ablation is recorded in schedule_mix_revision; prior V1/V2/semantic-region evidence and test counts are historical and preserved.",
-  "functional_source_sha256": "676d2fb31e29013f41523ddb1bcac7436e6382ee95f52c95539faa4cbd0e6c86",
+  "scope": "Latest source adds configurable A/B/C GAE and blocked/mixed schedule experiments, preserving legacy V1/V2 and mixed-schedule-only evidence. New CI verification is CPU/native mechanical only; no real-data learning claim.",
+  "functional_source_sha256": "299febcf044d8a6e0757cd7fc2f081c572171644ec2c31db999d3c4fc751864a",
   "unit_tests": {
     "count": 60,
     "status": "PASS"
@@ -102,7 +102,7 @@
     "status": "NOT_RUN_LOCALLY",
     "training_ready": false
   },
-  "next_required": "Fresh Kaggle preflight on the mixed-schedule source, then an independent 40-update schedule-only mini ablation using Train/Validation; no Test or full training before evidence of useful learning.",
+  "next_required": "Run exact-source, configuration-specific two-GPU Kaggle preflight for A/B/C independently, then authorized mini training from fresh initialization; compare Validation under locked cap, reserve Test30.",
   "historical_task_budget_v2_source_sha256": "420ff796b07e673416a41ee04815ead037020c6c6d620aa378003707429d9750",
   "semantic_region_revision": {
     "date": "2026-11-21",
@@ -240,5 +240,36 @@
     "old_training_compatible": false,
     "preserved_controls": "Historical 40-update checkpoints, splits, reward/cap and validation gates remain unchanged.",
     "useful_learning_verified": false
+  },
+  "gae_config_revision": {
+    "date": "2026-11-22",
+    "source_commit": "ed8f5d96bef821d08c1e5ee9329345210733f58a",
+    "functional_source_sha256": "299febcf044d8a6e0757cd7fc2f081c572171644ec2c31db999d3c4fc751864a",
+    "configurations": {
+      "A": {
+        "train_schedule": "blocked",
+        "gamma": 1,
+        "gae_lambda": 0.95
+      },
+      "B": {
+        "train_schedule": "mixed",
+        "gamma": 1,
+        "gae_lambda": 0.95
+      },
+      "C": {
+        "train_schedule": "mixed",
+        "gamma": 1,
+        "gae_lambda": 1
+      }
+    },
+    "changes": "Explicit CLI -> preflight -> binding -> optimizer -> checkpoint/resume config; per-transition advantage/return/TD and head probabilities in Kaggle SAFE artifacts. Distinct outputs and archives.",
+    "cpu_unit_tests": {
+      "count": 75,
+      "status": "PASS_GITHUB_ACTIONS"
+    },
+    "gpu_preflight": "NOT_RUN",
+    "f1_improvement_verified": false,
+    "warning": "Lambda=1 improves direct terminal reward propagation but may increase critic value gradients and variance; not a demonstrated policy improvement.",
+    "other_changes": "No reward formula, bitrate cap, Train/Val/Test lock, Actor architecture or native codec modifications."
   }
 }
