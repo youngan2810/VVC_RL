@@ -45,7 +45,9 @@ def load_checkpoint(path,model,ppo,expected):
     p=Path(path);identity=json.loads(p.with_suffix('.identity.json').read_text())
     if digest(p)!=identity['sha256']:raise ValueError('Checkpoint digest differs')
     c=torch.load(p,map_location='cpu',weights_only=True)
-    if (c.get('schema')!='vvc-rl-checkpoint/2' or c.get('binding')!=expected
+    if c.get('schema')!='vvc-rl-checkpoint/2':
+        raise ValueError('Legacy frozen controls cannot resume a current PPO experiment')
+    if (c.get('binding')!=expected
             or c.get('ppo_config')!=asdict(ppo.config) or expected.get('ppo')!=asdict(ppo.config)):
         raise ValueError('Checkpoint PPO/GAE/schedule/reward/source/environment binding differs; resume blocked')
     model.load_state_dict(c['model']);ppo.optimizer.load_state_dict(c['optimizer'])
