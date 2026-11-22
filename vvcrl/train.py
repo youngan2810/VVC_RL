@@ -6,7 +6,7 @@ import torch
 from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest
 from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash
-from .ppo import PPO
+from .ppo import PPO,policy_state_diagnostics
 from .reward import RatePrices
 from .validation import validation_summary,rollout_summary
 from .collect import collect,load_batches
@@ -34,17 +34,20 @@ def mixed_train_schedule(videos,rates=RATES,*,seed=20261120):
     return schedule
 
 def save_checkpoint(path,model,ppo,prices,iteration,episodes,bind,best,seed):
+    if bind.get('ppo')!=asdict(ppo.config):raise ValueError('Checkpoint PPO config differs from training binding')
     p=Path(path);p.parent.mkdir(parents=True,exist_ok=True);tmp=p.with_name(p.name+'.tmp')
     torch.save({'schema':'vvc-rl-checkpoint/2','model':model.state_dict(),'optimizer':ppo.optimizer.state_dict(),
       'prices':prices.state(),'iteration':iteration,'episodes':episodes,'binding':bind,'best_validation':best,'seed':seed,
-      'torch_rng':torch.get_rng_state(),'model_sha256':model_hash(model)},tmp)
+      'torch_rng':torch.get_rng_state(),'model_sha256':model_hash(model),'ppo_config':asdict(ppo.config)},tmp)
     tmp.replace(p);atomic_json(p.with_suffix('.identity.json'),{'sha256':digest(p),'model_sha256':model_hash(model),'iteration':iteration,'binding':bind})
 
 def load_checkpoint(path,model,ppo,expected):
     p=Path(path);identity=json.loads(p.with_suffix('.identity.json').read_text())
     if digest(p)!=identity['sha256']:raise ValueError('Checkpoint digest differs')
     c=torch.load(p,map_location='cpu',weights_only=True)
-    if c.get('schema')!='vvc-rl-checkpoint/2' or c['binding']!=expected:raise ValueError('Checkpoint reward/source/profile/environment differs; V1 checkpoints are frozen controls, not V2 resumes')
+    if (c.get('schema')!='vvc-rl-checkpoint/2' or c.get('binding')!=expected
+            or c.get('ppo_config')!=asdict(ppo.config) or expected.get('ppo')!=asdict(ppo.config)):
+        raise ValueError('Checkpoint PPO/GAE/schedule/reward/source/environment binding differs; resume blocked')
     model.load_state_dict(c['model']);ppo.optimizer.load_state_dict(c['optimizer'])
     if model_hash(model)!=c['model_sha256']:raise ValueError('Checkpoint weight identity differs')
     torch.set_rng_state(c['torch_rng']);return c
@@ -94,7 +97,9 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
                 if model_hash(model)!=before:raise ValueError('Validation changed model')
                 report=validation_summary(validation,val_items,reward_config)
                 score=report['macro_delta_quality']
-                report.update(model_unchanged=True,rollout_diagnostics=rollout_summary(validation))
+                report.update(model_unchanged=True,rollout_diagnostics=rollout_summary(validation),
+                              ppo_config=asdict(ppo.config),train_schedule=train_schedule,
+                              policy_head_state_diagnostics=policy_state_diagnostics(model,load_batches(validation)) if validation else {})
                 atomic_json(output/'validations'/f'{iteration:06}.json',report)
                 if report['eligible_checkpoint'] and score>best:
                     best=score;save_checkpoint(output/'checkpoints/best_validation.pt',model,ppo,prices,iteration,episodes,bind,best,seed)
