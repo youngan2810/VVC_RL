@@ -1,7 +1,7 @@
 {
-  "date": "2026-11-21",
-  "scope": "Current policy proof is in semantic_region_revision; all preexisting V2 test/result fields below are historical and preserved.",
-  "functional_source_sha256": "5bf88f1bb97f09da12a48c17cd0fe000f231ef0fe33d00c62f3d55ccf0b51697",
+  "date": "2026-11-22",
+  "scope": "Current mixed-schedule ablation is recorded in schedule_mix_revision; prior V1/V2/semantic-region evidence and test counts are historical and preserved.",
+  "functional_source_sha256": "676d2fb31e29013f41523ddb1bcac7436e6382ee95f52c95539faa4cbd0e6c86",
   "unit_tests": {
     "count": 60,
     "status": "PASS"
@@ -12,10 +12,10 @@
     "fixture": "synthetic brightness, not YOLO/BDD100K",
     "bitstream_sha256": "ae67df79b4fd6c43d1da341cc5d68b47797b3537c62c19f7dbf0895bcab0dfce",
     "decoder_native_parity": true,
-    "reward_identity_error": 0.0,
+    "reward_identity_error": 0,
     "terminal_rate_penalty_count": 1,
     "clip_objective": {
-      "task_component": 0.0,
+      "task_component": 0,
       "bit_component": -0.0033174999999999954,
       "raw": -0.0033174999999999954,
       "budget_cap_bits": 101118.72,
@@ -25,47 +25,47 @@
     "action_audit": {
       "qg_candidate_rows": 848,
       "requested_delta_histogram": {
+        "0": 176,
         "1": 163,
-        "-1": 163,
         "2": 164,
-        "-2": 182,
-        "0": 176
+        "-1": 163,
+        "-2": 182
       },
       "effective_delta_histogram": {
+        "0": 176,
         "1": 163,
-        "-1": 163,
         "2": 164,
-        "-2": 182,
-        "0": 176
+        "-1": 163,
+        "-2": 182
       },
       "clipped_rows": 0,
       "quant_unique_candidates": 116299,
       "qg_mapping_verified": true,
       "winning_cu_pixels": 9830400,
       "winning_qp_pixel_histogram": {
-        "32": 1205952,
-        "26": 41264,
-        "25": 123520,
-        "33": 2104864,
-        "29": 221264,
+        "22": 4400,
         "23": 26368,
         "24": 11888,
+        "25": 123520,
+        "26": 41264,
+        "27": 26480,
+        "29": 221264,
         "30": 296560,
-        "34": 504896,
         "31": 530784,
+        "32": 1205952,
+        "33": 2104864,
+        "34": 504896,
         "35": 464384,
+        "36": 508672,
         "37": 1175168,
-        "41": 153600,
-        "42": 307200,
         "38": 1956224,
         "39": 166912,
-        "36": 508672,
-        "27": 26480,
-        "22": 4400
+        "41": 153600,
+        "42": 307200
       },
       "winning_coverage_verified": true,
       "nonzero_requests_zeroed": 0,
-      "nonzero_requests_zeroed_fraction": 0.0,
+      "nonzero_requests_zeroed_fraction": 0,
       "note": "Candidate calls are not winning pixel area. Final CU QP includes residual-free CUs."
     },
     "stats": {
@@ -73,14 +73,14 @@
       "value_loss": 0.005252983886748552,
       "aux_loss": 0.6995874245961508,
       "entropy_mean": 1.6075589656829834,
-      "approx_kl_joint": 1.3031686345736185e-05,
-      "clip_fraction": 0.0,
+      "approx_kl_joint": 0.000013031686345736185,
+      "clip_fraction": 0,
       "grad_norm": 1.6057785352071126,
       "policy_head_gradient_norm": 1.5785873868748845,
       "optimizer_steps": 3,
       "early_stop": false,
-      "replay_logprob_error": 3.814697265625e-06,
-      "replay_value_error": 7.450580596923828e-08,
+      "replay_logprob_error": 0.000003814697265625,
+      "replay_value_error": 7.450580596923828e-8,
       "actor_head_change": 0.0003004966420121491,
       "critic_head_change": 0.00029997434467077255
     },
@@ -102,7 +102,7 @@
     "status": "NOT_RUN_LOCALLY",
     "training_ready": false
   },
-  "next_required": "Exact-source V2 Kaggle preflight; then fresh 40-update mini A/B. No full training or Test30 until useful-learning review.",
+  "next_required": "Fresh Kaggle preflight on the mixed-schedule source, then an independent 40-update schedule-only mini ablation using Train/Validation; no Test or full training before evidence of useful learning.",
   "historical_task_budget_v2_source_sha256": "420ff796b07e673416a41ee04815ead037020c6c6d620aa378003707429d9750",
   "semantic_region_revision": {
     "date": "2026-11-21",
@@ -113,7 +113,7 @@
       "train_frames": 20480,
       "both_regions_present": 20150,
       "coherent_region_maps_sampled": 0,
-      "expected_exact_roi_redistribute_occurrences": 6.286850280396163e-05,
+      "expected_exact_roi_redistribute_occurrences": 0.00006286850280396163,
       "interpretation": "Measured exploration bottleneck, not proof of the sole cause of V2 failure."
     },
     "unit_tests": {
@@ -125,14 +125,14 @@
       "epochs": 3,
       "minibatch": 64,
       "clip": 0.2,
-      "gamma": 1.0,
+      "gamma": 1,
       "gae_lambda": 0.95,
       "value_coef": 0.5,
       "entropy_coef": 0.01,
       "auxiliary_coef": 0.1,
       "max_grad": 0.5,
       "target_kl": 0.05,
-      "reward_scale": 100.0
+      "reward_scale": 100
     },
     "initialization_check": "On same host/seed: 20 shared/Critic/Aux tensors, original actor head and CPU RNG identical to baseline; heads clone then train independently.",
     "native_smoke": {
@@ -156,7 +156,7 @@
       "status": "PASS_SYNTHETIC_REAL_CODEC_SINGLE_UPDATE",
       "frames": 64,
       "decoder_native_parity": true,
-      "reward_identity_error": 0.0,
+      "reward_identity_error": 0,
       "before_model": "cca7f395b4436ff4c6bafb898034b3132557a647c37aa52dbe18abbeca7c371d",
       "after_model": "0f58e6814b2e4c39a7831e75c1a407c3a947121c067c64e89baf66d82b4ba64a",
       "checkpoint_reload_exact": true,
@@ -165,14 +165,14 @@
         "value_loss": 0.002087957264545063,
         "aux_loss": 0.6961604158083597,
         "entropy_mean": 1.6075737873713176,
-        "approx_kl_joint": 3.711630900700887e-06,
-        "clip_fraction": 0.0,
+        "approx_kl_joint": 0.000003711630900700887,
+        "clip_fraction": 0,
         "grad_norm": 0.46669909358024597,
         "policy_head_gradient_norm": 0.3991120540331618,
         "optimizer_steps": 3,
         "early_stop": false,
-        "replay_logprob_error": 4.76837158203125e-07,
-        "replay_value_error": 7.450580596923828e-08,
+        "replay_logprob_error": 4.76837158203125e-7,
+        "replay_value_error": 7.450580596923828e-8,
         "actor_head_change": 0.00030049600172787905,
         "critic_head_change": 0.00030046701431274414
       },
@@ -189,14 +189,14 @@
         47
       ],
       "regional_full_map_accuracy": [
-        1.0,
-        1.0,
-        1.0
+        1,
+        1,
+        1
       ],
       "original_full_map_accuracy": [
-        0.0,
-        0.0,
-        0.0
+        0,
+        0,
+        0
       ],
       "original_per_ctu_accuracy": [
         0.4970703125,
@@ -226,5 +226,19 @@
       "reason": "No local locked MOV source, YOLO weights or CUDA. CPU toy/native fixtures cannot establish better F1 than QPA."
     },
     "next_required": "Fresh exact-source real-data preflight; then controlled mini only. Keep metric/cap/split and compare QPA/ROI/frozen V2. No old checkpoint or gate migration."
+  },
+  "schedule_mix_revision": {
+    "date": "2026-11-22",
+    "source_commit": "7183c7653ce45b39fd5b55675a8192e84b729006",
+    "functional_source_sha256": "676d2fb31e29013f41523ddb1bcac7436e6382ee95f52c95539faa4cbd0e6c86",
+    "ablation": "Seeded video interleaving only: two distinct Train videos per PPO update across five 16-video rounds, with exact 16x5 pair coverage and unchanged 40-update budget.",
+    "cpu_unit_tests": {
+      "count": 68,
+      "status": "PASS_GITHUB_ACTIONS"
+    },
+    "native_and_gpu_status": "Not rerun on revised source; native, reward, PPO, state and action mapping were not changed. Fresh exact-source preflight remains mandatory.",
+    "old_training_compatible": false,
+    "preserved_controls": "Historical 40-update checkpoints, splits, reward/cap and validation gates remain unchanged.",
+    "useful_learning_verified": false
   }
 }
