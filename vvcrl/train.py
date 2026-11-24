@@ -34,9 +34,9 @@ def mixed_train_schedule(videos,rates=RATES,*,seed=20261120):
     return schedule
 
 def save_checkpoint(path,model,ppo,prices,iteration,episodes,bind,best,seed):
-    if ppo.model is not model:raise ValueError('Checkpoint optimizer/model mismatch')
-    if bind.get('state_version',LEGACY_STATE)!=model.state_version:raise ValueError('Checkpoint state schema differs from model')
     if bind.get('ppo')!=asdict(ppo.config):raise ValueError('Checkpoint PPO config differs from training binding')
+    if bind.get('state_version',LEGACY_STATE)!=model.state_version:raise ValueError('Checkpoint state schema differs from model')
+    if ppo.model is not model:raise ValueError('Checkpoint optimizer/model mismatch')
     p=Path(path);p.parent.mkdir(parents=True,exist_ok=True);tmp=p.with_name(p.name+'.tmp')
     torch.save({'schema':CHECKPOINT_SCHEMA,'model':model.state_dict(),'optimizer':ppo.optimizer.state_dict(),
       'prices':prices.state(),'iteration':iteration,'episodes':episodes,'binding':bind,'best_validation':best,'seed':seed,
