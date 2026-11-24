@@ -2,13 +2,15 @@ import hashlib,io
 import torch
 from torch import nn
 from torch.distributions import Categorical
-from .config import NY,NX,N
+from .config import NY,NX,N,LEGACY_STATE,state_shape
 
 class ActorCritic(nn.Module):
-    def __init__(self):
+    def __init__(self,state_version=LEGACY_STATE):
         super().__init__()
-        self.spatial=nn.Sequential(nn.Conv2d(8,32,3,padding=1),nn.GroupNorm(4,32),nn.Tanh(),nn.Conv2d(32,32,3,padding=1),nn.GroupNorm(4,32),nn.Tanh())
-        self.global_net=nn.Sequential(nn.Linear(15,32),nn.Tanh(),nn.Linear(32,32),nn.Tanh())
+        self.state_version=state_version
+        spatial_channels,global_channels=state_shape(state_version)
+        self.spatial=nn.Sequential(nn.Conv2d(spatial_channels,32,3,padding=1),nn.GroupNorm(4,32),nn.Tanh(),nn.Conv2d(32,32,3,padding=1),nn.GroupNorm(4,32),nn.Tanh())
+        self.global_net=nn.Sequential(nn.Linear(global_channels,32),nn.Tanh(),nn.Linear(32,32),nn.Tanh())
         # Source-ROI/background factors coordinate residuals under a frame
         # reward. The native action stays 12 integer CTU QPs.
         self.actor=nn.Conv2d(64,5,1)
@@ -25,6 +27,8 @@ class ActorCritic(nn.Module):
                 self.actor.weight.copy_(original.weight.repeat(2,1,1,1))
                 self.actor.bias.copy_(original.bias.repeat(2))
     def features(self,x,g):
+        sc,gc=state_shape(self.state_version)
+        if x.ndim!=4 or x.shape[1:]!=(sc,NY,NX) or g.shape!=(len(x),gc):raise ValueError('State schema/model shape mismatch')
         z=self.spatial(x);global_z=self.global_net(g);joined=torch.cat([z,global_z[:,:,None,None].expand(-1,-1,NY,NX)],1)
         weights=x[:,7:8].clamp_min(1e-8);pooled=(z*weights).sum((2,3))/weights.sum((2,3))
         return joined,torch.cat([pooled,global_z],1)

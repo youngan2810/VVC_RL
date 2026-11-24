@@ -2,7 +2,7 @@ from dataclasses import asdict
 from pathlib import Path
 import hashlib,json,time,shutil,gzip
 import numpy as np
-from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical
+from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical,LEGACY_STATE,FEEDBACK_STATE,state_shape
 from .engine import NativeProcess,verify_decode,audit_trace
 from .state import StateBuilder
 from .metrics import task,summary
@@ -13,8 +13,9 @@ def cache_identity(source,profile,rate,encoder,detector_identity,boxes):
     teacher_sha=hashlib.sha256(canonical(boxes).encode()).hexdigest()
     return {'source_pixel_sha256':digest(source),'source_teacher_sha256':teacher_sha,'profile':asdict(profile),'rate':rate,'encoder_sha256':digest(encoder),'detector':detector_identity,'task':TASK}
 
-def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=RewardConfig()):
-    reward_config.validate()
+def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=RewardConfig(),state_version=LEGACY_STATE):
+    reward_config.validate();state_shape(state_version)
+    if model is not None and model.state_version!=state_version:raise ValueError('Episode/model state schema mismatch')
     if split not in ('train','val'):raise ValueError('This research runner does not select from Test')
     if not verify:raise ValueError('Independent decoder verification cannot be disabled')
     identity=cache_identity(source,profile,rate,encoder,detector_identity,boxes)
@@ -22,7 +23,7 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
     if len(boxes)!=profile.frames:raise ValueError('Teacher POC count mismatch')
     if split!='train' and not deterministic and fixed is None:raise ValueError('Validation policy must be deterministic')
     before=model_hash(model) if model is not None else None
-    proc=NativeProcess(encoder,source,folder,profile,rate);state=StateBuilder(source,boxes,profile.frames,rate,price)
+    proc=NativeProcess(encoder,source,folder,profile,rate,feedback=state_version==FEEDBACK_STATE);state=StateBuilder(source,boxes,profile.frames,rate,price,state_version)
     batch={k:[] for k in ('x','g','actions','log_prob','value','reward','done','aux_target','aux_weight')};records=[];by_poc={};occupancies=[];timing={'state':0.,'decision':0.,'encode_handshake':0.,'decoded_detector':0.}
     try:
         for k in range(profile.frames):
@@ -45,6 +46,7 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
               state_sha256=hashlib.sha256(x.tobytes()+g.tobytes()).hexdigest(),mse_y_10bit=mse,reconstruction_sha256=hashlib.sha256(recon.tobytes()).hexdigest())
             if model is not None:
                 record.update(log_probability=lp,value=value,entropy_mean=float(out['entropy_mean']),logits=out['logits'].tolist())
+            if state_version==FEEDBACK_STATE:record['native_feedback']={'poc':poc,'winning_qp':outcome['winning_qp'],'pre_action_ctu_qp':obs['qp']}
             records.append(record);by_poc[str(poc)]={'score':metrics['score'],'bits':outcome['bits']}
             for key,val in [('x',x),('g',g),('actions',actions),('log_prob',lp),('value',value),('reward',rew['train']),('done',k==profile.frames-1),('aux_target',metrics['aux_target']),('aux_weight',metrics['aux_weight'])]:batch[key].append(val)
             state.advance(obs,delta,outcome)
@@ -59,7 +61,7 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
           'mean_delta_background_ctus':float(actions[occ==0].mean()) if (occ==0).any() else None,
           'per_ctu_distribution':[{str(d):float(np.mean(actions[:,i]==d)) for d in DELTAS} for i in range(12)]}
         result['mean_action_entropy']=float(np.mean([r['entropy_mean'] for r in records])) if model is not None else None
-        result.update(identity=identity,split=split,rate=rate,budget=state.budget,by_poc=by_poc,model_sha256=before,deterministic=deterministic,
+        result.update(identity=identity,state_version=state_version,split=split,rate=rate,budget=state.budget,by_poc=by_poc,model_sha256=before,deterministic=deterministic,
           anchor_bits=anchor['bits'] if anchor is not None else result['bits'],anchor_quality=anchor['task_retention_f1_v2'] if anchor is not None else result['task_retention_f1_v2'],
           psnr_y_10bit=10*np.log10(1023**2/max(np.mean([r['mse_y_10bit'] for r in records]),1e-30)))
         # Mechanical accounting identity, not a claim of learned usefulness.

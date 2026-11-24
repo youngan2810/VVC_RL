@@ -4,7 +4,7 @@ from pathlib import Path
 import hashlib,json,multiprocessing as mp,os,time
 import numpy as np
 import torch
-from .config import Profile,RewardConfig,atomic_json,canonical,digest
+from .config import Profile,RewardConfig,atomic_json,canonical,digest,LEGACY_STATE
 from .model import ActorCritic,model_hash
 from .data import DETECTOR_ID,open_detector,prepared_clip
 from .episode import run_episode,verified_result
@@ -23,7 +23,10 @@ def anchor_episode(spec,detector,source,boxes,profile):
 
 def _worker(spec):
     torch.set_num_threads(1);torch.manual_seed(spec['seed']);np.random.seed(spec['seed']%(2**32))
-    model=ActorCritic();checkpoint=torch.load(spec['snapshot'],map_location='cpu',weights_only=True);model.load_state_dict(checkpoint['model']);model.eval()
+    version=spec.get('state_version',LEGACY_STATE)
+    checkpoint=torch.load(spec['snapshot'],map_location='cpu',weights_only=True)
+    if checkpoint.get('state_version',checkpoint.get('binding',{}).get('state_version',LEGACY_STATE))!=version:raise ValueError('Collector state schema mismatch')
+    model=ActorCritic(version);model.load_state_dict(checkpoint['model']);model.eval()
     if model_hash(model)!=spec['model_sha256']:raise ValueError('Collector checkpoint differs from parent')
     profile=Profile(**spec['profile']);detector=open_detector(spec['tools'],spec['device'])
     try:
@@ -41,7 +44,7 @@ def _worker(spec):
             fixed=lambda obs:roi_action(boxes[obs['poc']],control=='roi_redistribute');policy=None
         elif control!='ppo':raise ValueError('Unknown diagnostic control')
         result,batch=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
-          profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'],reward_config=RewardConfig(**spec.get('reward_config',{})))
+          profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'],reward_config=RewardConfig(**spec.get('reward_config',{})),state_version=version)
         cache_meta=json.loads((cache/key/'cache.json').read_text())
         atomic_json(folder/'collector.json',{'video':spec['video'],'split':spec['split'],'device':spec['device'],'model_sha256':model_hash(model),'input_cache_key':key,'seed':spec['seed'],
           'control':control,'source_stage_timing':cache_meta.get('timing')})

@@ -10,6 +10,13 @@ RATES=(50,80,120,160,200)
 W,H,FPS,CTU=480,320,30,128
 NY,NX,N=3,4,12
 FB=W*H*3//2
+LEGACY_STATE='legacy-v1'
+FEEDBACK_STATE='encoder-feedback-v1'
+STATE_SHAPES={LEGACY_STATE:(8,15),FEEDBACK_STATE:(11,18)}
+
+def state_shape(version=LEGACY_STATE):
+    if version not in STATE_SHAPES:raise ValueError('Unknown state schema: '+str(version))
+    return STATE_SHAPES[version]
 
 @dataclass(frozen=True)
 class RewardConfig:
