@@ -4,11 +4,11 @@ from pathlib import Path
 import hashlib,json,multiprocessing as mp,os,time
 import numpy as np
 import torch
-from .config import Profile,RewardConfig,atomic_json,canonical,digest,LEGACY_STATE,UTILITY_SCHEMA
+from .config import Profile,RewardConfig,atomic_json,canonical,digest,LEGACY_STATE,UTILITY_SCHEMA,state_shape,NY,NX
 from .model import ActorCritic,model_hash
 from .data import DETECTOR_ID,open_detector,prepared_clip
 from .episode import run_episode,verified_result
-from .controls import roi_action
+from .controls import roi_action,roi_pair_action
 
 def anchor_episode(spec,detector,source,boxes,profile):
     key=hashlib.sha256(canonical({'pixel':digest(source),'teacher_sha256':hashlib.sha256(canonical(boxes).encode()).hexdigest(),'frames':profile.frames,'rate':spec['rate'],'encoder':digest(spec['encoder']),'detector':DETECTOR_ID,'profile':asdict(profile),'task':'task_retention_f1_v2','utility_schema':UTILITY_SCHEMA,'reward':spec.get('reward_config',{}),'reward_scale':spec.get('reward_scale',100.)}).encode()).hexdigest()
@@ -42,12 +42,16 @@ def _worker(spec):
         elif control=='noop':fixed=lambda obs:np.zeros(12,int);policy=None
         elif control in ('roi_protect','roi_redistribute'):
             fixed=lambda obs:roi_action(boxes[obs['poc']],control=='roi_redistribute');policy=None
+        elif control in ('roi_0_bg_p1','roi_m1_bg_p1','roi_m2_bg_p1','roi_0_bg_m1'):
+            rd,bd={'roi_0_bg_p1':(0,1),'roi_m1_bg_p1':(-1,1),'roi_m2_bg_p1':(-2,1),'roi_0_bg_m1':(0,-1)}[control]
+            fixed=lambda obs:roi_pair_action(boxes[obs['poc']],rd,bd);policy=None
         elif control!='ppo':raise ValueError('Unknown diagnostic control')
         result,batch=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
           profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'],reward_config=RewardConfig(**spec.get('reward_config',{})),state_version=version,reward_scale=spec.get('reward_scale',100.))
         cache_meta=json.loads((cache/key/'cache.json').read_text())
         atomic_json(folder/'collector.json',{'video':spec['video'],'split':spec['split'],'device':spec['device'],'model_sha256':model_hash(model),'input_cache_key':key,'seed':spec['seed'],
-          'control':control,'source_stage_timing':cache_meta.get('timing')})
+          'control':control,'source_stage_timing':cache_meta.get('timing'),'state_version':version,'reward_config':result['reward_config'],'reward_scale':result['reward_scale']})
+        seal=json.loads((folder/'SEAL.json').read_text());seal['collector.json']=digest(folder/'collector.json');atomic_json(folder/'SEAL.json',seal)
         return {'folder':str(folder),'result':result,'pid':os.getpid(),'device':spec['device'],'model_sha256':model_hash(model),'video':spec['video']}
     finally:detector.close()
 
@@ -60,10 +64,23 @@ def collect(specs):
     if len({x['pid'] for x in results})!=len(specs):raise ValueError('Collectors were not independent processes')
     return results
 
-def load_batches(results):
-    records=[]
+def load_batches(results,*,expected_split=None,state_version=None,reward_config=None,reward_scale=None,expected_model=None):
+    if not results:raise ValueError('Empty rollout batch')
+    records=[];contracts=[]
     for r in results:
         proof=verified_result(r['folder'])
         if proof is None or proof!=r['result']:raise ValueError('Rollout evidence does not match collector')
-        with np.load(Path(r['folder'])/'rollout.npz',allow_pickle=False) as z:records.append({k:z[k].copy() for k in z.files})
+        version=proof.get('state_version',LEGACY_STATE);sc,gc=state_shape(version)
+        cfg=proof['reward_config'];scale=proof.get('reward_scale',100.)
+        if expected_split is not None and proof['split']!=expected_split:raise ValueError('Rollout split mismatch; never train on validation')
+        if state_version is not None and version!=state_version:raise ValueError('Rollout state schema mismatch')
+        if reward_config is not None and cfg!=asdict(reward_config):raise ValueError('Rollout reward binding mismatch')
+        if reward_scale is not None and scale!=reward_scale:raise ValueError('Rollout reward scale mismatch')
+        if expected_model is not None and proof['model_sha256']!=expected_model:raise ValueError('Rollout is not from the current policy')
+        contracts.append((proof['split'],version,canonical(cfg),scale,proof['model_sha256']))
+        with np.load(Path(r['folder'])/'rollout.npz',allow_pickle=False) as z:record={k:z[k].copy() for k in z.files}
+        n=proof['identity']['profile']['frames']
+        if record['x'].shape!=(n,sc,NY,NX) or record['g'].shape!=(n,gc) or record['done'].shape!=(n,) or not record['done'][-1] or record['done'][:-1].any():raise ValueError('Rollout tensor/complete episode contract mismatch')
+        records.append(record)
+    if len(set(contracts))!=1:raise ValueError('Cannot mix split, schema, reward or policy in a rollout batch')
     return {k:np.concatenate([r[k] for r in records]) for k in records[0]}

@@ -16,7 +16,7 @@ def diagnose(root,output,gate,toolchain,input_root,tools,checkpoint,profile=Prof
     torch.set_num_threads(1);model=ActorCritic(state_version);state=load_checkpoint(checkpoint,model,PPO(model,ppo_config),bind);before=model_hash(model)
     catalog=VideoCatalog(input_root,mode='mini',seed=20261111);rows={};token=uuid.uuid4().hex[:8]
     try:
-        for control in ('ppo','random','fixed_m2','fixed_p2','roi_protect','roi_redistribute'):
+        for control in ('ppo','random','fixed_m2','fixed_p2','roi_protect','roi_redistribute','roi_0_bg_p1','roi_m1_bg_p1','roi_m2_bg_p1','roi_0_bg_m1'):
             results=[]
             for start in (0,2):
                 specs=[dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
@@ -26,6 +26,6 @@ def diagnose(root,output,gate,toolchain,input_root,tools,checkpoint,profile=Prof
             rows[control]=[{'video':r['video'],**r['result']} for r in results]
         if model_hash(model)!=before:raise ValueError('Diagnostics modified policy')
         report={'status':'VALIDATION_DIAGNOSTICS_COMPLETE','test_used':False,'checkpoint_model_sha256':before,'results':rows,
-          'interpretation':'Compare PPO to its paired no-op anchor, fixed -2/+2, random, and both semantic ROI heuristics using actual bits. Nonzero action or a changed bitstream alone is not useful learning. This one-rate check does not establish BD-rate.'}
+          'interpretation':'Compare PPO to its paired no-op anchor, fixed -2/+2, random, historical semantic heuristics and the four native Validation controls using actual bits. Nonzero action or a changed bitstream alone is not useful learning. This one-rate check does not establish BD-rate.'}
         atomic_json(output/'POLICY_CONTROLS.json',report);return report
     finally:export_run(output,output.parent/'VVC_RL_POLICY_CONTROLS_KAGGLE_SAFE.zip')

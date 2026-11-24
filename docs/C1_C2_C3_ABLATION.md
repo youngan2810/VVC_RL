@@ -4,7 +4,10 @@ Base: main 161adf96456e36c20340885737a13489bc88d45f.
 Frozen historical B20: ed8f5d96bef821d08c1e5ee9329345210733f58a. Keep its notebook,
 checkpoint and toolchain at that commit. New fingerprints intentionally prohibit
 resuming old optimizer/checkpoint under a changed experiment. Legacy state and
-reward still use 8x3x4 / 15 and the original PPO architecture. New training must
+reward still use 8x3x4 / 15 and the original PPO architecture. Versioned checkpoints use /3; historical /2
+can only be read under their exact old binding, never resumed into this branch.
+Common C1 weights and RNG are initialized identically to C0, new input weights
+start at zero and are trainable. New training must
 start in a separate output directory; do not overwrite B20 or use Test10.
 
 | Ablation | --state-version | --reward-version |
@@ -55,6 +58,10 @@ and --start-mini-training. Resume only from the same binding; use --resume
 with matching latest checkpoint and count additional updates. The original
 historical notebook remains pinned to B20; do not replace its hash.
 C4/C5 architecture/optimizer tuning intentionally deferred until ablation.
+The validation-only diagnose command includes all four exact ROI/BG controls
+from the 72-case native validation. It is a one-rate diagnostic, not BD-rate.
+The real-data gate remains mandatory; the native smoke also exercises a single
+synthetic combined PPO update and never authorizes mini training.
 
 Acceptance: source and native parity, causality and replay, exact raw/scaled
 reward accounting, independent decode, checkpoint/resume, real-data gate, then

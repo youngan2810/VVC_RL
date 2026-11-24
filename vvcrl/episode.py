@@ -83,8 +83,9 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
         if not np.isclose(raw,expected,rtol=0,atol=1e-10):raise ValueError('Reward sum does not equal clip objective')
         if not np.isclose(sum(r['reward']['train'] for r in records),reward_scale*expected,rtol=0,atol=1e-8):raise ValueError('Scaled reward sum does not equal clip objective')
         result['raw_return']=raw;result['reward_identity_error']=abs(raw-expected)
-        result['terminal_rate_penalty_count']=sum(r['reward']['bit_component']!=0 for r in records) if reward_config.version=='task-budget-v2' else None
-        if reward_config.version=='task-budget-v2' and any(r['reward']['bit_component']!=0 for r in records[:-1]):raise ValueError('V2 bitrate penalty must occur only at the final coding step')
+        terminal_only=not reward_config.progressive and reward_config.version!='paired-linear-v1'
+        result['terminal_rate_penalty_count']=sum(r['reward']['bit_component']!=0 for r in records) if terminal_only else None
+        if terminal_only and any(r['reward']['bit_component']!=0 for r in records[:-1]):raise ValueError('V2 bitrate penalty must occur only at the final coding step')
         if model is not None and model_hash(model)!=before:raise ValueError('Collection/validation changed model weights')
         folder=Path(folder);atomic_json(folder/'frames.json',records);atomic_json(folder/'result.json',result)
         packed={k:np.asarray(v) for k,v in batch.items()};np.savez_compressed(folder/'rollout.npz',**packed)

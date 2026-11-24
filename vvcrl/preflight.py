@@ -36,7 +36,7 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         train=collect(specs(catalog.selected['train'][:2],'train',snapshot,model,'mechanical_train'))
         if {r['device'] for r in train}!={'cuda:0','cuda:1'} or len({r['pid'] for r in train})!=2:raise ValueError('Two-GPU collection contract failed')
         checks['two_gpu_collectors']=True;checks['real_train_rollout']=True
-        batch=load_batches(train);before=model_hash(model);stats=ppo.update(batch)
+        before=model_hash(model);batch=load_batches(train,expected_split='train',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=before);stats=ppo.update(batch)
         checks['logprob_value_replay']=stats['replay_logprob_error']<=2e-5 and stats['replay_value_error']<=2e-5
         # Entropy alone can change Actor weights: require a nonzero policy-loss
         # gradient as well. This is still a mechanism check, not useful learning.
@@ -48,6 +48,7 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         restored=ActorCritic(state_version);restored.load_state_dict(torch.load(after,map_location='cpu',weights_only=True)['model']);checks['checkpoint_reload']=model_hash(restored)==model_hash(model)
         val_before=model_hash(model)
         val=collect(specs(catalog.selected['val'][:1],'val',after,model,'validation_no_update'))
+        load_batches(val,expected_split='val',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=val_before)
         checks['validation_no_update']=model_hash(model)==val_before and all(r['model_sha256']==val_before for r in val)
         atomic_json(output/'REAL_DATA_SUMMARY.json',{'train':[r['result'] for r in train],'validation':[r['result'] for r in val],
           'policy_changed_on_validation':False,'learning_quality_claim':False,'test_used':False})

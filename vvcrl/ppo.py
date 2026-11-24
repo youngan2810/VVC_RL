@@ -103,7 +103,7 @@ class PPO:
                 if not torch.isfinite(loss):raise ValueError('Nonfinite PPO objective')
                 policy_grads=torch.autograd.grad(policy,list(m.actor.parameters()),retain_graph=True,allow_unused=True)
                 policy_grad_norm=sum(float(v.detach().square().sum()) for v in policy_grads if v is not None)**.5
-                self.optimizer.zero_grad(set_to_none=True);loss.backward();grad=torch.nn.utils.clip_grad_norm_(m.parameters(),c.max_grad);self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True);loss.backward();grad=torch.nn.utils.clip_grad_norm_(m.parameters(),c.max_grad,error_if_nonfinite=True);self.optimizer.step()
                 metrics.append({'policy_loss':float(policy.detach()),'value_loss':float(value.detach()),'aux_loss':float(aux.detach()),'entropy_mean':float(entropy.detach()),'approx_kl_joint':float(kl.detach()),
                   'clip_fraction':float(((ratio-1).abs()>c.clip).float().mean().detach()),'grad_norm':float(grad),'policy_head_gradient_norm':policy_grad_norm})
             if stopped:break

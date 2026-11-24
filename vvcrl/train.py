@@ -3,9 +3,9 @@ from pathlib import Path
 import itertools,json,time,uuid
 import numpy as np
 import torch
-from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest,LEGACY_STATE
+from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest,LEGACY_STATE,CHECKPOINT_SCHEMA
 from .locked.data import VideoCatalog
-from .model import ActorCritic,model_hash
+from .model import ActorCritic,model_hash,state_dict_hash
 from .ppo import PPO,policy_state_diagnostics
 from .reward import RatePrices
 from .validation import validation_summary,rollout_summary
@@ -34,25 +34,33 @@ def mixed_train_schedule(videos,rates=RATES,*,seed=20261120):
     return schedule
 
 def save_checkpoint(path,model,ppo,prices,iteration,episodes,bind,best,seed):
+    if ppo.model is not model:raise ValueError('Checkpoint optimizer/model mismatch')
     if bind.get('state_version',LEGACY_STATE)!=model.state_version:raise ValueError('Checkpoint state schema differs from model')
     if bind.get('ppo')!=asdict(ppo.config):raise ValueError('Checkpoint PPO config differs from training binding')
     p=Path(path);p.parent.mkdir(parents=True,exist_ok=True);tmp=p.with_name(p.name+'.tmp')
-    torch.save({'schema':'vvc-rl-checkpoint/2','model':model.state_dict(),'optimizer':ppo.optimizer.state_dict(),
+    torch.save({'schema':CHECKPOINT_SCHEMA,'model':model.state_dict(),'optimizer':ppo.optimizer.state_dict(),
       'prices':prices.state(),'iteration':iteration,'episodes':episodes,'binding':bind,'best_validation':best,'seed':seed,
       'torch_rng':torch.get_rng_state(),'model_sha256':model_hash(model),'ppo_config':asdict(ppo.config),'state_version':model.state_version},tmp)
-    tmp.replace(p);atomic_json(p.with_suffix('.identity.json'),{'sha256':digest(p),'model_sha256':model_hash(model),'iteration':iteration,'binding':bind})
+    tmp.replace(p);atomic_json(p.with_suffix('.identity.json'),{'sha256':digest(p),'model_sha256':model_hash(model),'iteration':iteration,'binding':bind,'checkpoint_schema':CHECKPOINT_SCHEMA,'state_version':model.state_version})
 
 def load_checkpoint(path,model,ppo,expected):
     p=Path(path);identity=json.loads(p.with_suffix('.identity.json').read_text())
     if digest(p)!=identity['sha256']:raise ValueError('Checkpoint digest differs')
     c=torch.load(p,map_location='cpu',weights_only=True)
-    if c.get('schema')!='vvc-rl-checkpoint/2':
+    schema=c.get('schema')
+    if schema not in (CHECKPOINT_SCHEMA,'vvc-rl-checkpoint/2'):
         raise ValueError('Legacy frozen controls cannot resume a current PPO experiment')
     if (c.get('binding')!=expected
             or c.get('ppo_config')!=asdict(ppo.config) or expected.get('ppo')!=asdict(ppo.config)):
         raise ValueError('Checkpoint PPO/GAE/schedule/reward/source/environment binding differs; resume blocked')
+    if schema=='vvc-rl-checkpoint/2' and 'state_version' in expected:raise ValueError('Historical checkpoint cannot resume a versioned experiment')
     if c.get('state_version',LEGACY_STATE)!=expected.get('state_version',LEGACY_STATE) or model.state_version!=expected.get('state_version',LEGACY_STATE):raise ValueError('Checkpoint state schema differs; resume blocked')
-    model.load_state_dict(c['model']);ppo.optimizer.load_state_dict(c['optimizer'])
+    if ppo.model is not model:raise ValueError('Checkpoint optimizer/model mismatch')
+    if any(identity.get(k)!=c.get(k) for k in ('model_sha256','iteration','binding')):raise ValueError('Checkpoint sidecar identity differs')
+    if schema==CHECKPOINT_SCHEMA and (identity.get('checkpoint_schema')!=schema or identity.get('state_version')!=model.state_version):raise ValueError('Checkpoint sidecar schema differs')
+    weights=c['model'];target=model.state_dict()
+    if set(weights)!=set(target) or any(weights[k].shape!=target[k].shape or weights[k].dtype!=target[k].dtype for k in target) or state_dict_hash(weights)!=c['model_sha256']:raise ValueError('Checkpoint weight identity/shape differs')
+    model.load_state_dict(weights);ppo.optimizer.load_state_dict(c['optimizer'])
     if model_hash(model)!=c['model_sha256']:raise ValueError('Checkpoint weight identity differs')
     torch.set_rng_state(c['torch_rng']);return c
 
@@ -86,7 +94,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
             torch.save({'model':model.state_dict(),'state_version':state_version},snapshot)
             items=schedule[episodes:episodes+2]  # Two distinct videos; no wrap or replay
             rows=collect(specs(items,'train',snapshot,f'train_update{iteration:06}'))
-            stats=ppo.update(load_batches(rows),diagnostics_path=output/'updates'/f'{iteration+1:06}_signals.npz');episodes+=2;iteration+=1
+            stats=ppo.update(load_batches(rows,expected_split='train',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=model_hash(model)),diagnostics_path=output/'updates'/f'{iteration+1:06}_signals.npz');episodes+=2;iteration+=1
             prices.update([r['result'] for r in rows],training=True,config=reward_config)
             atomic_json(output/'updates'/f'{iteration:06}.json',{'iteration':iteration,'episodes':episodes,'stats':stats,'prices':prices.state(),'rollout_diagnostics':rollout_summary(rows),
               'schedule_mode':train_schedule,'ppo_config':asdict(ppo_config),'completed':[{'video':r['video'],'rate':r['result']['rate'],'bits':r['result']['bits'],'budget':r['result']['budget'],'quality':r['result']['task_retention_f1_v2'],'task_utility':r['result']['task_utility'],'utility_version':r['result']['utility_version']} for r in rows]})
@@ -103,7 +111,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
                 score=report['macro_delta_quality']
                 report.update(model_unchanged=True,rollout_diagnostics=rollout_summary(validation),
                               ppo_config=asdict(ppo.config),train_schedule=train_schedule,
-                              policy_head_state_diagnostics=policy_state_diagnostics(model,load_batches(validation)) if validation else {})
+                              policy_head_state_diagnostics=policy_state_diagnostics(model,load_batches(validation,expected_split='val',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=before)) if validation else {})
                 atomic_json(output/'validations'/f'{iteration:06}.json',report)
                 if report['eligible_checkpoint'] and score>best:
                     best=score;save_checkpoint(output/'checkpoints/best_validation.pt',model,ppo,prices,iteration,episodes,bind,best,seed)

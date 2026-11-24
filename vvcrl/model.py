@@ -9,8 +9,8 @@ class ActorCritic(nn.Module):
         super().__init__()
         self.state_version=state_version
         spatial_channels,global_channels=state_shape(state_version)
-        self.spatial=nn.Sequential(nn.Conv2d(spatial_channels,32,3,padding=1),nn.GroupNorm(4,32),nn.Tanh(),nn.Conv2d(32,32,3,padding=1),nn.GroupNorm(4,32),nn.Tanh())
-        self.global_net=nn.Sequential(nn.Linear(global_channels,32),nn.Tanh(),nn.Linear(32,32),nn.Tanh())
+        self.spatial=nn.Sequential(nn.Conv2d(8,32,3,padding=1),nn.GroupNorm(4,32),nn.Tanh(),nn.Conv2d(32,32,3,padding=1),nn.GroupNorm(4,32),nn.Tanh())
+        self.global_net=nn.Sequential(nn.Linear(15,32),nn.Tanh(),nn.Linear(32,32),nn.Tanh())
         # Source-ROI/background factors coordinate residuals under a frame
         # reward. The native action stays 12 integer CTU QPs.
         self.actor=nn.Conv2d(64,5,1)
@@ -26,6 +26,16 @@ class ActorCritic(nn.Module):
             with torch.no_grad():
                 self.actor.weight.copy_(original.weight.repeat(2,1,1,1))
                 self.actor.bias.copy_(original.bias.repeat(2))
+        # Keep all common parameters and RNG identical to C0 at the same seed.
+        # New input weights start at zero, remain trainable, and cannot change
+        # initial action preference just because the state dimension changed.
+        if state_version!=LEGACY_STATE:
+            with torch.random.fork_rng(devices=[]):
+                conv=nn.Conv2d(spatial_channels,32,3,padding=1);linear=nn.Linear(global_channels,32)
+                with torch.no_grad():
+                    conv.weight.zero_();conv.weight[:,:8].copy_(self.spatial[0].weight);conv.bias.copy_(self.spatial[0].bias)
+                    linear.weight.zero_();linear.weight[:,:15].copy_(self.global_net[0].weight);linear.bias.copy_(self.global_net[0].bias)
+                self.spatial[0]=conv;self.global_net[0]=linear
     def features(self,x,g):
         sc,gc=state_shape(self.state_version)
         if x.ndim!=4 or x.shape[1:]!=(sc,NY,NX) or g.shape!=(len(x),gc):raise ValueError('State schema/model shape mismatch')
@@ -68,7 +78,9 @@ class ActorCritic(nn.Module):
             result=self.evaluate(torch.as_tensor(x).unsqueeze(0),torch.as_tensor(g).unsqueeze(0),deterministic=deterministic)
         return {k:v[0].cpu().numpy() for k,v in result.items()}
 
-def model_hash(model):
+def state_dict_hash(weights):
     h=hashlib.sha256()
-    for k,v in sorted(model.state_dict().items()):h.update(k.encode());h.update(v.detach().cpu().contiguous().numpy().tobytes())
+    for k,v in sorted(weights.items()):h.update(k.encode());h.update(v.detach().cpu().contiguous().numpy().tobytes())
     return h.hexdigest()
+
+def model_hash(model):return state_dict_hash(model.state_dict())

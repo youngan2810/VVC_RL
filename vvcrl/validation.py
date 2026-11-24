@@ -11,7 +11,7 @@ def validation_summary(rows,expected_pairs,reward_config=RewardConfig()):
         if r.get('split')!='val':raise ValueError('Checkpoint selection requires validation only')
         seen.add(key);cap=bitrate_cap(r['budget'],r['anchor_bits'],reward_config)
         if 'utility_version' in r and r['utility_version']!=reward_config.utility:raise ValueError('Validation objective binding differs')
-        if reward_config.utility!='task_retention_f1_v2' and ('task_utility' not in r or 'anchor_task_utility' not in r):raise ValueError('Validation utility missing')
+        if reward_config.utility!='task_retention_f1_v2' and (r.get('utility_version')!=reward_config.utility or 'task_utility' not in r or 'anchor_task_utility' not in r):raise ValueError('Validation utility missing')
         detail.append({'video':row['video'],'rate':r['rate'],'delta_quality':r['task_retention_f1_v2']-r['anchor_quality'],
             'actual_kbps':r['actual_kbps'],'delta_bitrate_pct':100*(r['bits']/r['anchor_bits']-1),
             'budget_cap_bits':cap,'within_cap':r['bits']<=cap,'no_extra_bits':r['bits']<=r['anchor_bits']*(1+reward_config.rate_tolerance),

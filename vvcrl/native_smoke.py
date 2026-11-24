@@ -5,7 +5,8 @@ import numpy as np
 import torch
 from .config import Profile,FB,W,H,atomic_json,digest,LEGACY_STATE,FEEDBACK_STATE,RewardConfig
 from .episode import run_episode
-from .model import ActorCritic
+from .model import ActorCritic,model_hash
+from .ppo import PPO
 from .controls import roi_action
 
 class FixtureDetector:
@@ -66,6 +67,16 @@ def run_smoke(toolchain,output):
     for name,version in (('soft_iou_fixed_plus1','task-budget-v2-soft-iou'),('combined_fixed_plus1','task-budget-v3-progressive-soft-iou')):
         soft,_=case(name,fixed=lambda obs:np.ones(12,int),anchor=anchor,reward_config=RewardConfig(version))
         if soft['bitstream_sha256']!=results['fixed_1']['bitstream_sha256'] or soft['task_retention_f1_v2']!=results['fixed_1']['task_retention_f1_v2'] or soft['reward_identity_error']>1e-10:raise ValueError('C3 soft utility changed native stream or legacy F1')
+    # One synthetic real-codec mechanical PPO update with all three changes.
+    # This is not useful learning or a real-data training gate.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(721);mechanical=ActorCritic(FEEDBACK_STATE)
+        result,batch=run_episode(encoder=toolchain['encoder'],decoder=toolchain['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=identity,
+          profile=profile,rate=120,folder=root/'combined_ppo_mechanics',model=mechanical,anchor=anchor,split='train',state_version=FEEDBACK_STATE,reward_config=RewardConfig('task-budget-v3-progressive-soft-iou'))
+        before=model_hash(mechanical);optimizer=PPO(mechanical);stats=optimizer.update(batch)
+        if model_hash(mechanical)==before or stats['actor_head_change']<=0 or stats['critic_head_change']<=0:raise ValueError('Combined native PPO mechanics failed')
+        results['combined_ppo_mechanics']=result
+        atomic_json(root/'COMBINED_PPO_MECHANICS.json',{'training_ready':False,'synthetic_only':True,'stats':stats})
     summary={'status':'PASS_NATIVE_MECHANICS_ONLY','synthetic_only':True,'training_ready':False,
       'checks':{'native_noop_parity':True,'all_five_integer_bins':True,'spatial_mapping':True,'actor_to_encoder':True,'au_bit_accounting':True,'independent_decode':True,'live_state_causality':True},
       'cases':{n:{k:r[k] for k in ('bits','actual_kbps','psnr_y_10bit','bitstream_sha256','decoder_native_parity','action_audit')} for n,r in results.items()}}
