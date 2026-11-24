@@ -81,6 +81,7 @@ class RatePrices:
         config.validate()
         deviations={str(r):[] for r in RATES}
         for x in completed:
+            if x.get('split','train')!='train':raise ValueError('Never adapt prices on validation/Test')
             if x['rate'] not in RATES or not np.isfinite([x['bits'],x['budget']]).all() or min(x['bits'],x['budget'])<=0:raise ValueError('Invalid completed training row')
             cap=x['budget'] if config.version=='paired-linear-v1' else bitrate_cap(x['budget'],x['anchor_bits'],config)
             deviations[str(x['rate'])].append((x['bits']-cap)/x['budget'])

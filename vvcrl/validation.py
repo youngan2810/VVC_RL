@@ -4,12 +4,17 @@ from .config import DELTAS,RewardConfig
 from .reward import bitrate_cap
 
 def validation_summary(rows,expected_pairs,reward_config=RewardConfig()):
-    expected=set(expected_pairs);seen=set();detail=[]
+    reward_config.validate();pairs=list(expected_pairs);expected=set(pairs);seen=set();detail=[]
+    if len(pairs)!=len(expected):raise ValueError('Duplicate expected validation pair')
     for row in rows:
         r=row['result'];key=(row['video'],r['rate'])
         if key not in expected or key in seen:raise ValueError('Unexpected or duplicate validation pair')
         if r.get('split')!='val':raise ValueError('Checkpoint selection requires validation only')
         seen.add(key);cap=bitrate_cap(r['budget'],r['anchor_bits'],reward_config)
+        scores=[r['task_retention_f1_v2'],r['anchor_quality'],r.get('task_utility',r['task_retention_f1_v2']),r.get('anchor_task_utility',r['anchor_quality'])]
+        if not np.isfinite(scores+[r['bits'],r['actual_kbps']]).all() or any(not 0<=s<=1 for s in scores) or min(r['bits'],r['actual_kbps'])<=0:raise ValueError('Invalid validation quality or bit accounting')
+        for name in ('matched_iou_f1_v1','anchor_matched_iou_f1_v1'):
+            if name in r and (not np.isfinite(r[name]) or not 0<=r[name]<=1):raise ValueError('Invalid validation localization score')
         if 'utility_version' in r and r['utility_version']!=reward_config.utility:raise ValueError('Validation objective binding differs')
         if reward_config.utility!='task_retention_f1_v2' and (r.get('utility_version')!=reward_config.utility or 'task_utility' not in r or 'anchor_task_utility' not in r):raise ValueError('Validation utility missing')
         detail.append({'video':row['video'],'rate':r['rate'],'delta_quality':r['task_retention_f1_v2']-r['anchor_quality'],

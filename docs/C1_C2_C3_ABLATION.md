@@ -67,3 +67,14 @@ Acceptance: source and native parity, causality and replay, exact raw/scaled
 reward accounting, independent decode, checkpoint/resume, real-data gate, then
 paired validation F1, actual bitrate and all caps against C0/B20/fixed controls,
 GT-mAP and multiple seeds. Unit/synthetic smoke evidence is not useful learning.
+
+## Pre-training audit hardening
+Resume requires the latest checkpoint inside the same imported run, matching
+RUN_PROTOCOL.json (seed and validation cadence) and PROGRESS.json (checkpoint
+hash, completed updates and pending validation). Incomplete validation must
+finish before further training; a crash between checkpoint and journal writes
+fails closed; recover the last intact SAFE export. Do not resume historical
+artifacts into this branch. Full preflight exercises the production checkpoint
+save/load and verifies RNG and dual prices. Cache keys bind video/split and
+preprocessing or decoder as appropriate. All changes are mechanical safeguards,
+not optimizer or policy changes. Real-data preflight still requires two GPUs.

@@ -11,11 +11,13 @@ from .episode import run_episode,verified_result
 from .controls import roi_action,roi_pair_action
 
 def anchor_episode(spec,detector,source,boxes,profile):
-    key=hashlib.sha256(canonical({'pixel':digest(source),'teacher_sha256':hashlib.sha256(canonical(boxes).encode()).hexdigest(),'frames':profile.frames,'rate':spec['rate'],'encoder':digest(spec['encoder']),'detector':DETECTOR_ID,'profile':asdict(profile),'task':'task_retention_f1_v2','utility_schema':UTILITY_SCHEMA,'reward':spec.get('reward_config',{}),'reward_scale':spec.get('reward_scale',100.)}).encode()).hexdigest()
+    key=hashlib.sha256(canonical({'video':spec['video'],'split':spec['split'],'decoder':digest(spec['decoder']),'pixel':digest(source),'teacher_sha256':hashlib.sha256(canonical(boxes).encode()).hexdigest(),'frames':profile.frames,'rate':spec['rate'],'encoder':digest(spec['encoder']),'detector':DETECTOR_ID,'profile':asdict(profile),'task':'task_retention_f1_v2','utility_schema':UTILITY_SCHEMA,'reward':spec.get('reward_config',{}),'reward_scale':spec.get('reward_scale',100.)}).encode()).hexdigest()
     base=Path(spec['output'])/'anchors'/key;base.mkdir(parents=True,exist_ok=True)
     for p in sorted(base.glob('attempt*')):
         r=verified_result(p)
-        if r is not None:return r
+        if r is not None:
+            if r['split']!=spec['split'] or r['reward_config']!=asdict(RewardConfig(**spec.get('reward_config',{}))) or r['reward_scale']!=spec.get('reward_scale',100.):raise ValueError('Anchor cache contract mismatch')
+            return r
     folder=base/f'attempt{len(list(base.glob("attempt*"))):03}'
     r,_=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
       profile=profile,rate=spec['rate'],folder=folder,split=spec['split'],deterministic=True,reward_config=RewardConfig(**spec.get('reward_config',{})),reward_scale=spec.get('reward_scale',100.))

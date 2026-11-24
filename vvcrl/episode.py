@@ -21,7 +21,8 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
     if not verify:raise ValueError('Independent decoder verification cannot be disabled')
     identity=cache_identity(source,profile,rate,encoder,detector_identity,boxes)
     if anchor is not None and anchor['identity']!=identity:raise ValueError('Anchor cache identity mismatch')
-    if anchor is not None and reward_config.utility!=TASK and ('matched_iou_f1_v1' not in anchor or any('matched_iou_f1_v1' not in v for v in anchor['by_poc'].values())):raise ValueError('Anchor utility schema missing; regenerate paired anchor')
+    if anchor is not None and ('matched_iou_f1_v1' not in anchor or any('matched_iou_f1_v1' not in v for v in anchor['by_poc'].values())):raise ValueError('Anchor utility schema missing; regenerate paired anchor')
+    if anchor is not None and anchor.get('split')!=split:raise ValueError('Anchor split mismatch')
     if len(boxes)!=profile.frames:raise ValueError('Teacher POC count mismatch')
     if split!='train' and not deterministic and fixed is None:raise ValueError('Validation policy must be deterministic')
     progress=ProgressiveBudget(profile.frames,rate*1000*profile.frames/30,reward_config,anchor) if reward_config.progressive else None
@@ -32,7 +33,9 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
         for k in range(profile.frames):
             obs=proc.observation();started=time.perf_counter();x,g=state.build(obs);poc=obs['poc'];occupancies.append(x[0].ravel().copy());timing['state']+=time.perf_counter()-started;started=time.perf_counter()
             if fixed is not None:
-                delta=np.asarray(fixed(obs),int).reshape(12);actions=delta+2;lp=value=0.
+                requested=np.asarray(fixed(obs))
+                if requested.size!=12 or requested.dtype.kind not in 'iu' or (requested< -2).any() or (requested>2).any():raise ValueError('Fixed control requires legal integer residuals')
+                delta=requested.astype(np.int64).reshape(12);actions=delta+2;lp=value=0.
             elif model is None:actions=np.full(12,2,np.int64);delta=actions-2;lp=value=0.
             else:
                 out=model.act(x,g,deterministic);actions=out['actions'];delta=actions-2;lp=float(out['log_prob']);value=float(out['value'])

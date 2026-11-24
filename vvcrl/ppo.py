@@ -6,13 +6,18 @@ from .config import PPOConfig
 
 def gae(rewards,values,terminated,gamma=1.,lam=.95,last_value=0.):
     r=np.asarray(rewards,np.float32);v=np.asarray(values,np.float32);d=np.asarray(terminated,bool)
-    if r.shape!=v.shape or r.shape!=d.shape:raise ValueError('GAE shapes differ')
+    if r.ndim!=1 or not len(r) or r.shape!=v.shape or r.shape!=d.shape:raise ValueError('GAE shapes differ')
+    if not np.isfinite(r).all() or not np.isfinite(v).all() or not np.isfinite([gamma,lam,last_value]).all():raise ValueError('Nonfinite GAE input')
+    flags=np.asarray(terminated)
+    if flags.dtype.kind not in 'biu' or not np.isin(flags,[0,1]).all():raise ValueError('Invalid GAE terminal flags')
     adv=np.zeros_like(r);carry=0.
     for t in reversed(range(len(r))):
         next_v=last_value if t==len(r)-1 else v[t+1];nonterminal=1-float(d[t])
         delta=r[t]+gamma*next_v*nonterminal-v[t]
         carry=delta+gamma*lam*nonterminal*carry;adv[t]=carry
-    return adv,adv+v
+    returns=adv+v
+    if not np.isfinite(adv).all() or not np.isfinite(returns).all():raise ValueError('Nonfinite GAE result')
+    return adv,returns
 
 def head_diagnostics(out):
     """Per-head pre-update on-policy behavior; categorical order is -2..+2.
@@ -54,11 +59,15 @@ class PPO:
         config.validate();self.model,self.config=model,config;self.optimizer=torch.optim.Adam(model.parameters(),lr=config.learning_rate)
     def update(self,batch,diagnostics_path=None):
         c=self.config;m=self.model
-        if len(batch['done'])<2 or not batch['done'][-1]:raise ValueError('Update requires complete finite clips')
-        n=len(batch['done'])
+        done_flags=np.asarray(batch['done'])
+        if done_flags.ndim!=1 or done_flags.size<2 or done_flags.dtype.kind not in 'biu' or not np.isin(done_flags,[0,1]).all() or not done_flags[-1]:raise ValueError('Update requires complete finite clips')
+        n=len(done_flags)
         for key in ('x','g','actions','log_prob','value','reward','aux_target','aux_weight'):
             arr=np.asarray(batch[key])
             if len(arr)!=n or not np.isfinite(arr).all():raise ValueError('Nonfinite or mismatched PPO rollout: '+key)
+        for key in ('log_prob','value','reward'):
+            if np.asarray(batch[key]).shape!=(n,):raise ValueError('PPO vector shape mismatch: '+key)
+        if np.asarray(batch['aux_target']).shape!=(n,3,4) or np.asarray(batch['aux_weight']).shape!=(n,3,4) or (np.asarray(batch['aux_target'])<0).any() or (np.asarray(batch['aux_target'])>1).any() or (np.asarray(batch['aux_weight'])<0).any():raise ValueError('Invalid auxiliary target or weight')
         if np.asarray(batch['actions']).dtype.kind not in 'iu':raise ValueError('PPO requires original categorical integer indices, never rounded actions')
         x=torch.as_tensor(batch['x'],dtype=torch.float32);g=torch.as_tensor(batch['g'],dtype=torch.float32)
         a=torch.as_tensor(batch['actions'],dtype=torch.long);old_log=torch.as_tensor(batch['log_prob'],dtype=torch.float32)
@@ -78,6 +87,7 @@ class PPO:
                   'terminal_total_reward_nonzero':int(np.count_nonzero(rewards[done]))}
         adv=torch.as_tensor(adv);ret=torch.as_tensor(ret)
         adv=(adv-adv.mean())/(adv.std(unbiased=False)+1e-8)
+        if not torch.isfinite(adv).all() or not torch.isfinite(ret).all() or not np.isfinite(td_error).all() or not np.isfinite(variance):raise ValueError('Nonfinite PPO return/advantage')
         target=torch.as_tensor(batch['aux_target'],dtype=torch.float32);weight=torch.as_tensor(batch['aux_weight'],dtype=torch.float32)
         with torch.no_grad():
             replay=m.evaluate(x,g,a)
@@ -87,7 +97,7 @@ class PPO:
             factor_probabilities=replay['factor_logits'].softmax(-1).cpu().numpy()
             factor_actions=replay['factor_actions'].cpu().numpy()
             factor_active=replay['active_factors'].cpu().numpy()
-        if replay_error>2e-5 or value_error>2e-5:raise ValueError('Collector policy/value differs from optimizer before update')
+        if not np.isfinite([replay_error,value_error]).all() or replay_error>2e-5 or value_error>2e-5:raise ValueError('Collector policy/value differs from optimizer before update')
         before_actor=m.actor.weight.detach().clone();before_critic=m.critic[-1].weight.detach().clone();metrics=[];stopped=False
         for epoch in range(c.epochs):
             for idx in torch.randperm(len(x)).split(c.minibatch):
@@ -104,6 +114,7 @@ class PPO:
                 policy_grads=torch.autograd.grad(policy,list(m.actor.parameters()),retain_graph=True,allow_unused=True)
                 policy_grad_norm=sum(float(v.detach().square().sum()) for v in policy_grads if v is not None)**.5
                 self.optimizer.zero_grad(set_to_none=True);loss.backward();grad=torch.nn.utils.clip_grad_norm_(m.parameters(),c.max_grad,error_if_nonfinite=True);self.optimizer.step()
+                if not np.isfinite(policy_grad_norm) or any(not torch.isfinite(p).all() for p in m.parameters()):raise ValueError('Nonfinite optimizer result')
                 metrics.append({'policy_loss':float(policy.detach()),'value_loss':float(value.detach()),'aux_loss':float(aux.detach()),'entropy_mean':float(entropy.detach()),'approx_kl_joint':float(kl.detach()),
                   'clip_fraction':float(((ratio-1).abs()>c.clip).float().mean().detach()),'grad_norm':float(grad),'policy_head_gradient_norm':policy_grad_norm})
             if stopped:break

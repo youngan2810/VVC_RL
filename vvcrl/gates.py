@@ -12,7 +12,7 @@ MANDATORY=('unit_contracts','rgb_protocol','native_noop_parity','all_five_intege
 
 def environment():return {'python':platform.python_version(),'torch':str(torch.__version__),'numpy':np.__version__}
 def binding(root,toolchain,profile,workers=2,reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed',state_version=LEGACY_STATE):
-    reward_config.validate();ppo_config.validate();state_shape(state_version)
+    profile.validate();reward_config.validate();ppo_config.validate();state_shape(state_version)
     if train_schedule not in ('blocked','mixed'):raise ValueError('Unknown training schedule')
     return {'schema':SCHEMA,'task':TASK,'source_sha256':fingerprint(root),'profile':asdict(profile),'ppo':asdict(ppo_config),'train_schedule':train_schedule,'reward':asdict(reward_config),'detector':DETECTOR_ID,
       'binary_sha256':{k:digest(toolchain[k]) for k in ('encoder','vanilla','decoder')},'workers':workers,'environment':environment(),'state_version':state_version,'utility_schema':UTILITY_SCHEMA,'optimization_utility':reward_config.utility}

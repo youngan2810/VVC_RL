@@ -11,6 +11,8 @@ from .collect import collect,load_batches
 from .gates import MANDATORY,binding,write_gate
 from .native_smoke import run_smoke
 from .artifacts import export_run
+from .train import save_checkpoint,load_checkpoint
+from .reward import RatePrices
 
 def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),workers=2,seed=20261120,reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed',state_version=LEGACY_STATE):
     root=Path(root);output=Path(output);output.mkdir(parents=True,exist_ok=False);checks={k:False for k in MANDATORY}
@@ -44,12 +46,17 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         checks['critic_head_updated']=stats['critic_head_change']>0
         checks['reward_identity']=all(r['result']['reward_identity_error']<1e-10 for r in train)
         atomic_json(output/'PPO_MECHANICAL_UPDATE.json',{'before':before,'after':model_hash(model),'stats':stats,'ppo_config':asdict(ppo_config),'train_schedule':train_schedule,'scope':'one train-only update; not evidence of useful policy'})
-        after=output/'mechanical_checkpoint.pt';torch.save({'model':model.state_dict(),'optimizer':ppo.optimizer.state_dict(),'config':asdict(ppo_config),'state_version':state_version},after)
-        restored=ActorCritic(state_version);restored.load_state_dict(torch.load(after,map_location='cpu',weights_only=True)['model']);checks['checkpoint_reload']=model_hash(restored)==model_hash(model)
+        after=output/'mechanical_checkpoint.pt';prices=RatePrices();prices.update([r['result'] for r in train],config=reward_config)
+        rng=torch.get_rng_state().clone()
+        save_checkpoint(after,model,ppo,prices,1,len(train),bind,0.,seed)
+        restored=ActorCritic(state_version);restored_ppo=PPO(restored,ppo_config)
+        restored_state=load_checkpoint(after,restored,restored_ppo,bind)
+        checks['checkpoint_reload']=model_hash(restored)==model_hash(model) and torch.equal(torch.get_rng_state(),rng) and restored_state['prices']==prices.state() and restored_state['iteration']==1 and restored_state['episodes']==len(train)
+        if not checks['checkpoint_reload']:raise ValueError('Production checkpoint reload failed')
         val_before=model_hash(model)
         val=collect(specs(catalog.selected['val'][:1],'val',after,model,'validation_no_update'))
         load_batches(val,expected_split='val',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=val_before)
-        checks['validation_no_update']=model_hash(model)==val_before and all(r['model_sha256']==val_before for r in val)
+        checks['validation_no_update']=model_hash(model)==val_before and all(r['model_sha256']==val_before for r in val) and all(r['result']['reward_identity_error']<1e-10 for r in val)
         atomic_json(output/'REAL_DATA_SUMMARY.json',{'train':[r['result'] for r in train],'validation':[r['result'] for r in val],
           'policy_changed_on_validation':False,'learning_quality_claim':False,'test_used':False})
         # Bind every stored proof except bulky source/reconstruction, not merely PASS flags.

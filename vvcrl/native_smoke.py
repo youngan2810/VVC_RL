@@ -26,6 +26,7 @@ def fixture(path,frames=32):
     return boxes
 
 def run_smoke(toolchain,output):
+    torch.set_num_threads(1)
     root=Path(output);root.mkdir(parents=True,exist_ok=False);source=root/'fixture.yuv';boxes=fixture(source);detector=FixtureDetector();profile=Profile(frames=32)
     identity={'name':'SYNTHETIC_BRIGHTNESS_FIXTURE_NOT_YOLO'};results={}
     def case(name,fixed=None,model=None,anchor=None,state_version=LEGACY_STATE,reward_config=RewardConfig()):
@@ -74,9 +75,10 @@ def run_smoke(toolchain,output):
         result,batch=run_episode(encoder=toolchain['encoder'],decoder=toolchain['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=identity,
           profile=profile,rate=120,folder=root/'combined_ppo_mechanics',model=mechanical,anchor=anchor,split='train',state_version=FEEDBACK_STATE,reward_config=RewardConfig('task-budget-v3-progressive-soft-iou'))
         before=model_hash(mechanical);optimizer=PPO(mechanical);stats=optimizer.update(batch)
-        if model_hash(mechanical)==before or stats['actor_head_change']<=0 or stats['critic_head_change']<=0:raise ValueError('Combined native PPO mechanics failed')
+        if model_hash(mechanical)==before or stats['actor_head_change']<=0 or stats['critic_head_change']<=0 or stats['policy_head_gradient_norm']<=0:raise ValueError('Combined native PPO mechanics failed')
         results['combined_ppo_mechanics']=result
         atomic_json(root/'COMBINED_PPO_MECHANICS.json',{'training_ready':False,'synthetic_only':True,'stats':stats})
+        print('COMBINED_PPO_MECHANICS',stats,flush=True)
     summary={'status':'PASS_NATIVE_MECHANICS_ONLY','synthetic_only':True,'training_ready':False,
       'checks':{'native_noop_parity':True,'all_five_integer_bins':True,'spatial_mapping':True,'actor_to_encoder':True,'au_bit_accounting':True,'independent_decode':True,'live_state_causality':True},
       'cases':{n:{k:r[k] for k in ('bits','actual_kbps','psnr_y_10bit','bitstream_sha256','decoder_native_parity','action_audit')} for n,r in results.items()}}
