@@ -89,7 +89,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
             stats=ppo.update(load_batches(rows),diagnostics_path=output/'updates'/f'{iteration+1:06}_signals.npz');episodes+=2;iteration+=1
             prices.update([r['result'] for r in rows],training=True,config=reward_config)
             atomic_json(output/'updates'/f'{iteration:06}.json',{'iteration':iteration,'episodes':episodes,'stats':stats,'prices':prices.state(),'rollout_diagnostics':rollout_summary(rows),
-              'schedule_mode':train_schedule,'ppo_config':asdict(ppo_config),'completed':[{'video':r['video'],'rate':r['result']['rate'],'bits':r['result']['bits'],'budget':r['result']['budget'],'quality':r['result']['task_retention_f1_v2']} for r in rows]})
+              'schedule_mode':train_schedule,'ppo_config':asdict(ppo_config),'completed':[{'video':r['video'],'rate':r['result']['rate'],'bits':r['result']['bits'],'budget':r['result']['budget'],'quality':r['result']['task_retention_f1_v2'],'task_utility':r['result']['task_utility'],'utility_version':r['result']['utility_version']} for r in rows]})
             latest=output/'checkpoints/latest.pt';save_checkpoint(latest,model,ppo,prices,iteration,episodes,bind,best,seed)
             atomic_json(output/'PROGRESS.json',{'iteration':iteration,'episodes':episodes,'checkpoint':'checkpoints/latest.pt','best_validation_gain':best,'checkpoint_sha256':digest(latest)})
             if iteration%val_every==0 and time.monotonic()<deadline-900:

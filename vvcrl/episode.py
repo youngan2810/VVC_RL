@@ -2,7 +2,7 @@ from dataclasses import asdict
 from pathlib import Path
 import hashlib,json,time,shutil,gzip
 import numpy as np
-from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical,LEGACY_STATE,FEEDBACK_STATE,state_shape
+from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical,LEGACY_STATE,FEEDBACK_STATE,state_shape,UTILITY_SCHEMA
 from .engine import NativeProcess,verify_decode,audit_trace
 from .state import StateBuilder
 from .metrics import task,summary
@@ -11,7 +11,7 @@ from .model import model_hash
 
 def cache_identity(source,profile,rate,encoder,detector_identity,boxes):
     teacher_sha=hashlib.sha256(canonical(boxes).encode()).hexdigest()
-    return {'source_pixel_sha256':digest(source),'source_teacher_sha256':teacher_sha,'profile':asdict(profile),'rate':rate,'encoder_sha256':digest(encoder),'detector':detector_identity,'task':TASK}
+    return {'source_pixel_sha256':digest(source),'source_teacher_sha256':teacher_sha,'profile':asdict(profile),'rate':rate,'encoder_sha256':digest(encoder),'detector':detector_identity,'task':TASK,'utility_schema':UTILITY_SCHEMA}
 
 def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=RewardConfig(),state_version=LEGACY_STATE,reward_scale=100.):
     if not np.isfinite(reward_scale) or reward_scale<=0:raise ValueError('Invalid reward scale')
@@ -21,6 +21,7 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
     if not verify:raise ValueError('Independent decoder verification cannot be disabled')
     identity=cache_identity(source,profile,rate,encoder,detector_identity,boxes)
     if anchor is not None and anchor['identity']!=identity:raise ValueError('Anchor cache identity mismatch')
+    if anchor is not None and reward_config.utility!=TASK and ('matched_iou_f1_v1' not in anchor or any('matched_iou_f1_v1' not in v for v in anchor['by_poc'].values())):raise ValueError('Anchor utility schema missing; regenerate paired anchor')
     if len(boxes)!=profile.frames:raise ValueError('Teacher POC count mismatch')
     if split!='train' and not deterministic and fixed is None:raise ValueError('Validation policy must be deterministic')
     progress=ProgressiveBudget(profile.frames,rate*1000*profile.frames/30,reward_config,anchor) if reward_config.progressive else None
@@ -37,20 +38,21 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
                 out=model.act(x,g,deterministic);actions=out['actions'];delta=actions-2;lp=float(out['log_prob']);value=float(out['value'])
             timing['decision']+=time.perf_counter()-started;started=time.perf_counter();outcome,recon=proc.step(delta);timing['encode_handshake']+=time.perf_counter()-started
             started=time.perf_counter();yuv8=np.minimum(255,(recon.astype(np.uint32)+2)>>2).astype(np.uint8);pred=detector(yuv8);timing['decoded_detector']+=time.perf_counter()-started;metrics=task(boxes[poc],pred)
-            baseline=anchor['by_poc'][str(poc)] if anchor is not None else {'score':metrics['score'],'bits':outcome['bits']}
+            baseline=anchor['by_poc'][str(poc)] if anchor is not None else {'score':metrics['score'],'matched_iou_f1_v1':metrics['matched_iou_f1_v1'],'bits':outcome['bits']}
+            utility_key='score' if reward_config.utility==TASK else reward_config.utility
             context=progress.step(poc,outcome['bits'],outcome['bits_total']) if progress is not None else None
-            rew=reward(metrics['score'],baseline['score'],outcome['bits'],baseline['bits'],profile.frames,state.budget,price,scale=reward_scale,config=reward_config,terminal=k==profile.frames-1,
+            rew=reward(metrics[utility_key],baseline[utility_key],outcome['bits'],baseline['bits'],profile.frames,state.budget,price,scale=reward_scale,config=reward_config,terminal=k==profile.frames-1,
               total_bits=outcome['bits_total'] if progress is not None or k==profile.frames-1 else None,
               anchor_total_bits=(anchor['bits'] if anchor is not None else outcome['bits_total']) if k==profile.frames-1 else None,progress=context)
             ref=state.raw[poc,:W*H].astype(np.float64)*4;mse=float(np.mean((recon[:W*H].astype(np.float64)-ref)**2))
-            record={k:metrics[k] for k in ('score','legacy_f1','tp','fp','fn')}
+            record={k:metrics[k] for k in ('score','matched_iou_f1_v1','legacy_f1','tp','fp','fn')}
             record.update(k=k,poc=poc,bits=outcome['bits'],bits_total=outcome['bits_total'],reward=rew,
               source_boxes=np.asarray(boxes[poc]).tolist(),decoded_boxes=np.asarray(pred).tolist(),requested_delta=delta.tolist(),actions=actions.tolist(),
               state_sha256=hashlib.sha256(x.tobytes()+g.tobytes()).hexdigest(),mse_y_10bit=mse,reconstruction_sha256=hashlib.sha256(recon.tobytes()).hexdigest())
             if model is not None:
                 record.update(log_probability=lp,value=value,entropy_mean=float(out['entropy_mean']),logits=out['logits'].tolist())
             if state_version==FEEDBACK_STATE:record['native_feedback']={'poc':poc,'winning_qp':outcome['winning_qp'],'pre_action_ctu_qp':obs['qp']}
-            records.append(record);by_poc[str(poc)]={'score':metrics['score'],'bits':outcome['bits']}
+            records.append(record);by_poc[str(poc)]={'score':metrics['score'],'matched_iou_f1_v1':metrics['matched_iou_f1_v1'],'bits':outcome['bits']}
             for key,val in [('x',x),('g',g),('actions',actions),('log_prob',lp),('value',value),('reward',rew['train']),('done',k==profile.frames-1),('aux_target',metrics['aux_target']),('aux_weight',metrics['aux_weight'])]:batch[key].append(val)
             state.advance(obs,delta,outcome)
             if (k+1)%16==0:print('PICTURE_PROGRESS',split,k+1,'/',profile.frames,'poc',poc,'bits',outcome['bits_total'],flush=True)
@@ -69,7 +71,11 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
           psnr_y_10bit=10*np.log10(1023**2/max(np.mean([r['mse_y_10bit'] for r in records]),1e-30)))
         # Mechanical accounting identity, not a claim of learned usefulness.
         raw=sum(r['reward']['raw'] for r in records)
-        objective=clip_objective(result['task_retention_f1_v2'],result['anchor_quality'],result['bits'],result['anchor_bits'],state.budget,price,reward_config)
+        result['utility_version']=reward_config.utility
+        result['task_utility']=result[reward_config.utility]
+        result['anchor_task_utility']=anchor[reward_config.utility] if anchor is not None else result['task_utility']
+        result['anchor_matched_iou_f1_v1']=anchor['matched_iou_f1_v1'] if anchor is not None else result['matched_iou_f1_v1']
+        objective=clip_objective(result['task_utility'],result['anchor_task_utility'],result['bits'],result['anchor_bits'],state.budget,price,reward_config)
         expected=objective['raw']
         result.update(reward_config=asdict(reward_config),reward_price=price,reward_scale=float(reward_scale),clip_objective=objective,
           rate_reward_nonzero_steps=sum(r['reward']['bit_component']!=0 for r in records),

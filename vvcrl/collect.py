@@ -4,14 +4,14 @@ from pathlib import Path
 import hashlib,json,multiprocessing as mp,os,time
 import numpy as np
 import torch
-from .config import Profile,RewardConfig,atomic_json,canonical,digest,LEGACY_STATE
+from .config import Profile,RewardConfig,atomic_json,canonical,digest,LEGACY_STATE,UTILITY_SCHEMA
 from .model import ActorCritic,model_hash
 from .data import DETECTOR_ID,open_detector,prepared_clip
 from .episode import run_episode,verified_result
 from .controls import roi_action
 
 def anchor_episode(spec,detector,source,boxes,profile):
-    key=hashlib.sha256(canonical({'pixel':digest(source),'teacher_sha256':hashlib.sha256(canonical(boxes).encode()).hexdigest(),'frames':profile.frames,'rate':spec['rate'],'encoder':digest(spec['encoder']),'detector':DETECTOR_ID,'profile':asdict(profile),'task':'task_retention_f1_v2'}).encode()).hexdigest()
+    key=hashlib.sha256(canonical({'pixel':digest(source),'teacher_sha256':hashlib.sha256(canonical(boxes).encode()).hexdigest(),'frames':profile.frames,'rate':spec['rate'],'encoder':digest(spec['encoder']),'detector':DETECTOR_ID,'profile':asdict(profile),'task':'task_retention_f1_v2','utility_schema':UTILITY_SCHEMA,'reward':spec.get('reward_config',{}),'reward_scale':spec.get('reward_scale',100.)}).encode()).hexdigest()
     base=Path(spec['output'])/'anchors'/key;base.mkdir(parents=True,exist_ok=True)
     for p in sorted(base.glob('attempt*')):
         r=verified_result(p)

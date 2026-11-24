@@ -63,6 +63,9 @@ def run_smoke(toolchain,output):
     if np.any(b['x'][0,8:]) or np.any(b['g'][0,15:]):raise ValueError('C1 feedback leaked into initial state')
     progressive,_=case('progressive_fixed_plus1',fixed=lambda obs:np.ones(12,int),anchor=anchor,reward_config=RewardConfig('task-budget-v3-progressive'))
     if progressive['bitstream_sha256']!=results['fixed_1']['bitstream_sha256'] or abs(progressive['raw_return']-results['fixed_1']['raw_return'])>1e-10:raise ValueError('C2 reward/bitstream identity failed')
+    for name,version in (('soft_iou_fixed_plus1','task-budget-v2-soft-iou'),('combined_fixed_plus1','task-budget-v3-progressive-soft-iou')):
+        soft,_=case(name,fixed=lambda obs:np.ones(12,int),anchor=anchor,reward_config=RewardConfig(version))
+        if soft['bitstream_sha256']!=results['fixed_1']['bitstream_sha256'] or soft['task_retention_f1_v2']!=results['fixed_1']['task_retention_f1_v2'] or soft['reward_identity_error']>1e-10:raise ValueError('C3 soft utility changed native stream or legacy F1')
     summary={'status':'PASS_NATIVE_MECHANICS_ONLY','synthetic_only':True,'training_ready':False,
       'checks':{'native_noop_parity':True,'all_five_integer_bins':True,'spatial_mapping':True,'actor_to_encoder':True,'au_bit_accounting':True,'independent_decode':True,'live_state_causality':True},
       'cases':{n:{k:r[k] for k in ('bits','actual_kbps','psnr_y_10bit','bitstream_sha256','decoder_native_parity','action_audit')} for n,r in results.items()}}
