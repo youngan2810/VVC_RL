@@ -3,7 +3,7 @@ from pathlib import Path
 import os,subprocess
 import numpy as np
 import torch
-from .config import Profile,FB,W,H,atomic_json,digest,LEGACY_STATE,FEEDBACK_STATE
+from .config import Profile,FB,W,H,atomic_json,digest,LEGACY_STATE,FEEDBACK_STATE,RewardConfig
 from .episode import run_episode
 from .model import ActorCritic
 from .controls import roi_action
@@ -27,9 +27,9 @@ def fixture(path,frames=32):
 def run_smoke(toolchain,output):
     root=Path(output);root.mkdir(parents=True,exist_ok=False);source=root/'fixture.yuv';boxes=fixture(source);detector=FixtureDetector();profile=Profile(frames=32)
     identity={'name':'SYNTHETIC_BRIGHTNESS_FIXTURE_NOT_YOLO'};results={}
-    def case(name,fixed=None,model=None,anchor=None,state_version=LEGACY_STATE):
+    def case(name,fixed=None,model=None,anchor=None,state_version=LEGACY_STATE,reward_config=RewardConfig()):
         r,b=run_episode(encoder=toolchain['encoder'],decoder=toolchain['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=identity,
-          profile=profile,rate=120,folder=root/name,model=model,fixed=fixed,anchor=anchor,deterministic=True,split='train',state_version=state_version)
+          profile=profile,rate=120,folder=root/name,model=model,fixed=fixed,anchor=anchor,deterministic=True,split='train',state_version=state_version,reward_config=reward_config)
         results[name]=r;return r,b
     anchor,_=case('noop')
     env=os.environ.copy()
@@ -61,6 +61,8 @@ def run_smoke(toolchain,output):
     r,b=case('feedback_forced_plus1',model=feedback_model,anchor=anchor,state_version=FEEDBACK_STATE)
     if r['bitstream_sha256']!=results['fixed_1']['bitstream_sha256'] or b['x'].shape[1]!=11 or not np.any(b['x'][1:,8]):raise ValueError('C1 observation/bitstream parity failed')
     if np.any(b['x'][0,8:]) or np.any(b['g'][0,15:]):raise ValueError('C1 feedback leaked into initial state')
+    progressive,_=case('progressive_fixed_plus1',fixed=lambda obs:np.ones(12,int),anchor=anchor,reward_config=RewardConfig('task-budget-v3-progressive'))
+    if progressive['bitstream_sha256']!=results['fixed_1']['bitstream_sha256'] or abs(progressive['raw_return']-results['fixed_1']['raw_return'])>1e-10:raise ValueError('C2 reward/bitstream identity failed')
     summary={'status':'PASS_NATIVE_MECHANICS_ONLY','synthetic_only':True,'training_ready':False,
       'checks':{'native_noop_parity':True,'all_five_integer_bins':True,'spatial_mapping':True,'actor_to_encoder':True,'au_bit_accounting':True,'independent_decode':True,'live_state_causality':True},
       'cases':{n:{k:r[k] for k in ('bits','actual_kbps','psnr_y_10bit','bitstream_sha256','decoder_native_parity','action_audit')} for n,r in results.items()}}

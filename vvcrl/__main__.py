@@ -1,13 +1,13 @@
 from pathlib import Path
 import argparse,json
-from .config import Profile,RewardConfig,PPOConfig,STATE_SHAPES,LEGACY_STATE
+from .config import Profile,RewardConfig,PPOConfig,STATE_SHAPES,LEGACY_STATE,REWARD_VERSIONS
 
 def main():
     p=argparse.ArgumentParser(description='VVC QPA residual PPO; training is opt-in and full-preflight gated')
     p.add_argument('command',choices=['native-smoke','preflight','train-mini','diagnose','export','import'])
     p.add_argument('--output',required=True);p.add_argument('--toolchain');p.add_argument('--input',default='/kaggle/input');p.add_argument('--tools',default='/kaggle/working/vvc_rl_tools')
     p.add_argument('--frames',type=int,default=256);p.add_argument('--preflight');p.add_argument('--updates',type=int,default=10);p.add_argument('--val-every',type=int,default=5);p.add_argument('--hours',type=float,default=10)
-    p.add_argument('--reward-version',choices=['task-budget-v2','paired-linear-v1'],default='task-budget-v2')
+    p.add_argument('--reward-version',choices=REWARD_VERSIONS,default='task-budget-v2')
     p.add_argument('--rate-tolerance',type=float,default=.02);p.add_argument('--seed',type=int,default=20261120)
     p.add_argument('--gamma',type=float,default=1.0);p.add_argument('--gae-lambda',type=float,default=.95)
     p.add_argument('--state-version',choices=tuple(STATE_SHAPES),default=LEGACY_STATE)

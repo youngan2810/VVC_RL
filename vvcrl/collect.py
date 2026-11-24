@@ -18,7 +18,7 @@ def anchor_episode(spec,detector,source,boxes,profile):
         if r is not None:return r
     folder=base/f'attempt{len(list(base.glob("attempt*"))):03}'
     r,_=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
-      profile=profile,rate=spec['rate'],folder=folder,split=spec['split'],deterministic=True,reward_config=RewardConfig(**spec.get('reward_config',{})))
+      profile=profile,rate=spec['rate'],folder=folder,split=spec['split'],deterministic=True,reward_config=RewardConfig(**spec.get('reward_config',{})),reward_scale=spec.get('reward_scale',100.))
     return r
 
 def _worker(spec):
@@ -44,7 +44,7 @@ def _worker(spec):
             fixed=lambda obs:roi_action(boxes[obs['poc']],control=='roi_redistribute');policy=None
         elif control!='ppo':raise ValueError('Unknown diagnostic control')
         result,batch=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
-          profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'],reward_config=RewardConfig(**spec.get('reward_config',{})),state_version=version)
+          profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'],reward_config=RewardConfig(**spec.get('reward_config',{})),state_version=version,reward_scale=spec.get('reward_scale',100.))
         cache_meta=json.loads((cache/key/'cache.json').read_text())
         atomic_json(folder/'collector.json',{'video':spec['video'],'split':spec['split'],'device':spec['device'],'model_sha256':model_hash(model),'input_cache_key':key,'seed':spec['seed'],
           'control':control,'source_stage_timing':cache_meta.get('timing')})

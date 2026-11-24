@@ -6,14 +6,15 @@ from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical
 from .engine import NativeProcess,verify_decode,audit_trace
 from .state import StateBuilder
 from .metrics import task,summary
-from .reward import reward,clip_objective
+from .reward import reward,clip_objective,ProgressiveBudget
 from .model import model_hash
 
 def cache_identity(source,profile,rate,encoder,detector_identity,boxes):
     teacher_sha=hashlib.sha256(canonical(boxes).encode()).hexdigest()
     return {'source_pixel_sha256':digest(source),'source_teacher_sha256':teacher_sha,'profile':asdict(profile),'rate':rate,'encoder_sha256':digest(encoder),'detector':detector_identity,'task':TASK}
 
-def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=RewardConfig(),state_version=LEGACY_STATE):
+def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=RewardConfig(),state_version=LEGACY_STATE,reward_scale=100.):
+    if not np.isfinite(reward_scale) or reward_scale<=0:raise ValueError('Invalid reward scale')
     reward_config.validate();state_shape(state_version)
     if model is not None and model.state_version!=state_version:raise ValueError('Episode/model state schema mismatch')
     if split not in ('train','val'):raise ValueError('This research runner does not select from Test')
@@ -22,6 +23,7 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
     if anchor is not None and anchor['identity']!=identity:raise ValueError('Anchor cache identity mismatch')
     if len(boxes)!=profile.frames:raise ValueError('Teacher POC count mismatch')
     if split!='train' and not deterministic and fixed is None:raise ValueError('Validation policy must be deterministic')
+    progress=ProgressiveBudget(profile.frames,rate*1000*profile.frames/30,reward_config,anchor) if reward_config.progressive else None
     before=model_hash(model) if model is not None else None
     proc=NativeProcess(encoder,source,folder,profile,rate,feedback=state_version==FEEDBACK_STATE);state=StateBuilder(source,boxes,profile.frames,rate,price,state_version)
     batch={k:[] for k in ('x','g','actions','log_prob','value','reward','done','aux_target','aux_weight')};records=[];by_poc={};occupancies=[];timing={'state':0.,'decision':0.,'encode_handshake':0.,'decoded_detector':0.}
@@ -36,9 +38,10 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
             timing['decision']+=time.perf_counter()-started;started=time.perf_counter();outcome,recon=proc.step(delta);timing['encode_handshake']+=time.perf_counter()-started
             started=time.perf_counter();yuv8=np.minimum(255,(recon.astype(np.uint32)+2)>>2).astype(np.uint8);pred=detector(yuv8);timing['decoded_detector']+=time.perf_counter()-started;metrics=task(boxes[poc],pred)
             baseline=anchor['by_poc'][str(poc)] if anchor is not None else {'score':metrics['score'],'bits':outcome['bits']}
-            rew=reward(metrics['score'],baseline['score'],outcome['bits'],baseline['bits'],profile.frames,state.budget,price,config=reward_config,terminal=k==profile.frames-1,
-              total_bits=outcome['bits_total'] if k==profile.frames-1 else None,
-              anchor_total_bits=(anchor['bits'] if anchor is not None else outcome['bits_total']) if k==profile.frames-1 else None)
+            context=progress.step(poc,outcome['bits'],outcome['bits_total']) if progress is not None else None
+            rew=reward(metrics['score'],baseline['score'],outcome['bits'],baseline['bits'],profile.frames,state.budget,price,scale=reward_scale,config=reward_config,terminal=k==profile.frames-1,
+              total_bits=outcome['bits_total'] if progress is not None or k==profile.frames-1 else None,
+              anchor_total_bits=(anchor['bits'] if anchor is not None else outcome['bits_total']) if k==profile.frames-1 else None,progress=context)
             ref=state.raw[poc,:W*H].astype(np.float64)*4;mse=float(np.mean((recon[:W*H].astype(np.float64)-ref)**2))
             record={k:metrics[k] for k in ('score','legacy_f1','tp','fp','fn')}
             record.update(k=k,poc=poc,bits=outcome['bits'],bits_total=outcome['bits_total'],reward=rew,
@@ -68,8 +71,11 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
         raw=sum(r['reward']['raw'] for r in records)
         objective=clip_objective(result['task_retention_f1_v2'],result['anchor_quality'],result['bits'],result['anchor_bits'],state.budget,price,reward_config)
         expected=objective['raw']
-        result.update(reward_config=asdict(reward_config),reward_price=price,clip_objective=objective)
-        if not np.isclose(raw,expected,atol=1e-10):raise ValueError('Reward sum does not equal clip objective')
+        result.update(reward_config=asdict(reward_config),reward_price=price,reward_scale=float(reward_scale),clip_objective=objective,
+          rate_reward_nonzero_steps=sum(r['reward']['bit_component']!=0 for r in records),
+          budget_schedule=('anchor-coding-order-v1' if anchor is not None else 'target-linear-final-correction-v1') if progress is not None else None)
+        if not np.isclose(raw,expected,rtol=0,atol=1e-10):raise ValueError('Reward sum does not equal clip objective')
+        if not np.isclose(sum(r['reward']['train'] for r in records),reward_scale*expected,rtol=0,atol=1e-8):raise ValueError('Scaled reward sum does not equal clip objective')
         result['raw_return']=raw;result['reward_identity_error']=abs(raw-expected)
         result['terminal_rate_penalty_count']=sum(r['reward']['bit_component']!=0 for r in records) if reward_config.version=='task-budget-v2' else None
         if reward_config.version=='task-budget-v2' and any(r['reward']['bit_component']!=0 for r in records[:-1]):raise ValueError('V2 bitrate penalty must occur only at the final coding step')

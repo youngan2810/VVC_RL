@@ -20,7 +20,7 @@ def diagnose(root,output,gate,toolchain,input_root,tools,checkpoint,profile=Prof
             results=[]
             for start in (0,2):
                 specs=[dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
-                    snapshot=str(checkpoint),model_sha256=before,profile=asdict(profile),reward_config=asdict(reward_config),state_version=state_version,video=v,split='val',rate=120,price=state['prices']['values']['120'],
+                    snapshot=str(checkpoint),model_sha256=before,profile=asdict(profile),reward_config=asdict(reward_config),reward_scale=ppo_config.reward_scale,state_version=state_version,video=v,split='val',rate=120,price=state['prices']['values']['120'],
                     seed=20261120+i+start,device=f'cuda:{i}',episode_id=f'{token}_{control}_{i+start}',control=control) for i,v in enumerate(catalog.selected['val'][start:start+2])]
                 results+=collect(specs)
             rows[control]=[{'video':r['video'],**r['result']} for r in results]

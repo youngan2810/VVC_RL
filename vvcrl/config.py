@@ -18,12 +18,16 @@ def state_shape(version=LEGACY_STATE):
     if version not in STATE_SHAPES:raise ValueError('Unknown state schema: '+str(version))
     return STATE_SHAPES[version]
 
+REWARD_VERSIONS=('task-budget-v2','paired-linear-v1','task-budget-v3-progressive')
+
 @dataclass(frozen=True)
 class RewardConfig:
     version:str='task-budget-v2'
     rate_tolerance:float=.02
+    @property
+    def progressive(self):return self.version=='task-budget-v3-progressive'
     def validate(self):
-        if self.version not in ('task-budget-v2','paired-linear-v1') or not 0<=self.rate_tolerance<=.1:
+        if self.version not in REWARD_VERSIONS or not 0<=self.rate_tolerance<=.1:
             raise ValueError('Unknown reward version or invalid bitrate tolerance')
         return self
 

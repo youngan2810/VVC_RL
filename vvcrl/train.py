@@ -76,7 +76,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
     deadline=time.monotonic()+hours*3600
     def specs(items,split,snapshot,tag):
         return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
-          snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),state_version=state_version,video=v,split=split,rate=r,price=prices.values[str(r)],
+          snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),reward_scale=ppo_config.reward_scale,state_version=state_version,video=v,split=split,rate=r,price=prices.values[str(r)],
           seed=seed+episodes+i,device=f'cuda:{i}',episode_id=f'{invocation}_{tag}_{i}') for i,(v,r) in enumerate(items)]
     try:
         for _ in range(updates):

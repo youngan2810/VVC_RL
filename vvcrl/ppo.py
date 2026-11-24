@@ -55,6 +55,10 @@ class PPO:
     def update(self,batch,diagnostics_path=None):
         c=self.config;m=self.model
         if len(batch['done'])<2 or not batch['done'][-1]:raise ValueError('Update requires complete finite clips')
+        n=len(batch['done'])
+        for key in ('x','g','actions','log_prob','value','reward','aux_target','aux_weight'):
+            arr=np.asarray(batch[key])
+            if len(arr)!=n or not np.isfinite(arr).all():raise ValueError('Nonfinite or mismatched PPO rollout: '+key)
         if np.asarray(batch['actions']).dtype.kind not in 'iu':raise ValueError('PPO requires original categorical integer indices, never rounded actions')
         x=torch.as_tensor(batch['x'],dtype=torch.float32);g=torch.as_tensor(batch['g'],dtype=torch.float32)
         a=torch.as_tensor(batch['actions'],dtype=torch.long);old_log=torch.as_tensor(batch['log_prob'],dtype=torch.float32)

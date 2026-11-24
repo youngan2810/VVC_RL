@@ -31,7 +31,7 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         catalog.check_available(('train','val'))
         def specs(videos,split,snapshot,model,tag):
             return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
-              snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),state_version=state_version,video=v,split=split,rate=120,price=1.,
+              snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),reward_scale=ppo_config.reward_scale,state_version=state_version,video=v,split=split,rate=120,price=1.,
               seed=seed+i,device=f'cuda:{i}',episode_id=f'{tag}_{i}') for i,v in enumerate(videos)]
         train=collect(specs(catalog.selected['train'][:2],'train',snapshot,model,'mechanical_train'))
         if {r['device'] for r in train}!={'cuda:0','cuda:1'} or len({r['pid'] for r in train})!=2:raise ValueError('Two-GPU collection contract failed')
