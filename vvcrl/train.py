@@ -1,6 +1,6 @@
 from dataclasses import asdict
 from pathlib import Path
-import itertools,json,time,uuid,math
+import itertools,json,time,uuid,math,sys
 import numpy as np
 import torch
 from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest,LEGACY_STATE,CHECKPOINT_SCHEMA
@@ -94,10 +94,21 @@ def resume_progress(output,state):
         if json.loads(p.read_text()).get('iteration')!=int(p.stem):raise ValueError('Update journal identity mismatch')
     return progress['validation_pending']
 
+def check_update_budget(iteration,episodes,updates,schedule_size,pending):
+    if episodes<0 or iteration<0 or iteration*2!=episodes or updates<0 or (updates==0 and not pending) or episodes+2*updates>schedule_size:
+        raise ValueError('Mini schedule/resume exceeds the unique 40-update train budget or has nothing pending')
+
+def export_training_run(output,invocation,failed=False):
+    """A failed attempt must not overwrite the last resumable SAFE export."""
+    output=Path(output)
+    name=f'VVC_RL_MINI_{output.name}'
+    destination=output.parent/(name+(f'_FAILED_{invocation}' if failed else '')+'_SAFE.zip')
+    return export_run(output,destination)
+
 def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val_every=5,profile=Profile(),seed=20261120,resume=None,authorized=False,hours=10.,reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed',state_version=LEGACY_STATE):
     if not authorized:raise RuntimeError('Training disabled: explicitly pass --start-mini-training after reviewing full preflight')
     root=Path(root);output=Path(output);bind=binding(root,toolchain,profile,2,reward_config,ppo_config,train_schedule,state_version);require_gate(preflight,bind)
-    if type(updates) is not int or type(val_every) is not int or type(seed) is not int or updates<1 or val_every<1 or seed<0 or not math.isfinite(hours) or not 0<hours<=11.75:raise ValueError('Invalid update budget, seed, validation cadence or hours')
+    if type(updates) is not int or type(val_every) is not int or type(seed) is not int or updates<0 or (updates==0 and not resume) or val_every<1 or seed<0 or not math.isfinite(hours) or not 0<hours<=11.75:raise ValueError('Invalid update budget, seed, validation cadence or hours')
     run_contract=run_protocol(output,seed,val_every,resume)
     output.mkdir(parents=True,exist_ok=True);protocol=output/'TRAIN_BINDING.json'
     if resume and not protocol.is_file():raise ValueError('Resume training binding missing')
@@ -113,8 +124,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
         if pending and iteration%val_every:raise ValueError('Unexpected pending validation')
     catalog=VideoCatalog(input_root,mode='mini',seed=20261111);catalog.check_available(('train','val'))
     schedule=mixed_train_schedule(catalog.selected['train'],seed=seed) if train_schedule=='mixed' else list(itertools.product(catalog.selected['train'],RATES))
-    if episodes<0 or iteration*2!=episodes or episodes+2*updates>len(schedule):
-        raise ValueError('Mini schedule/resume exceeds the unique 40-update train budget')
+    check_update_budget(iteration,episodes,updates,len(schedule),pending)
     deadline=time.monotonic()+hours*3600
     def specs(items,split,snapshot,tag):
         return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
@@ -163,8 +173,12 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
             pending=iteration%val_every==0
             publish(pending)
             if pending:pending=not finish_validation()
-            export_run(output,output.parent/f'VVC_RL_MINI_{output.name}_SAFE.zip')
+            export_training_run(output,invocation)
             print('MINI_UPDATE_COMPLETE',iteration,episodes,stats,'validation_pending',pending,flush=True)
             if pending:break
         return {'iteration':iteration,'episodes':episodes,'best_validation_gain':best,'validation_pending':pending}
-    finally:export_run(output,output.parent/f'VVC_RL_MINI_{output.name}_SAFE.zip')
+    finally:
+        if sys.exc_info()[0] is None:export_training_run(output,invocation)
+        else:
+            try:export_training_run(output,invocation,failed=True)
+            except Exception as export_error:print('FAILURE_EXPORT_ERROR',repr(export_error),flush=True)

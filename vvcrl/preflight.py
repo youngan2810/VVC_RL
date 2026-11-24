@@ -31,6 +31,10 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         snapshot=output/'collector_initial.pt';torch.save({'model':model.state_dict(),'state_version':state_version},snapshot)
         catalog=VideoCatalog(input_root,mode='mini',seed=20261111)
         catalog.check_available(('train','val'))
+        checked={}
+        for split in ('train','val'):
+            checked[split]=[{'video':v,'sha256':digest(catalog.source(v))} for v in catalog.selected[split]]
+        atomic_json(output/'LOCKED_DATASET_VERIFIED.json',{'splits':checked,'test_used':False})
         def specs(videos,split,snapshot,model,tag):
             return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
               snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),reward_scale=ppo_config.reward_scale,state_version=state_version,video=v,split=split,rate=120,price=1.,

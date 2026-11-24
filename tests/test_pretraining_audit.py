@@ -5,7 +5,7 @@ from dataclasses import asdict
 import numpy as np
 import torch
 from vvcrl.config import atomic_json,digest,RewardConfig
-from vvcrl.train import run_protocol,resume_progress
+from vvcrl.train import run_protocol,resume_progress,check_update_budget,export_training_run
 from vvcrl.ppo import gae,PPO
 from vvcrl.model import ActorCritic,model_hash
 from vvcrl.reward import RatePrices
@@ -31,6 +31,21 @@ class PretrainingAuditTests(unittest.TestCase):
             with self.assertRaises(ValueError):resume_progress(root,state)
             (root/'updates/000002.json').unlink();latest.write_bytes(b'changed')
             with self.assertRaises(ValueError):resume_progress(root,state)
+    def test_final_pending_validation_can_resume_without_training(self):
+        check_update_budget(40,80,0,80,True)
+        with self.assertRaises(ValueError):check_update_budget(40,80,1,80,True)
+        with self.assertRaises(ValueError):check_update_budget(40,80,0,80,False)
+        check_update_budget(20,40,20,80,False)
+    def test_failure_export_does_not_overwrite_valid_safe(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)/'run';root.mkdir()
+            (root/'proof.txt').write_text('good')
+            good=export_training_run(root,'first')
+            original=digest(good)
+            (root/'proof.txt').write_text('partial')
+            failed=export_training_run(root,'second',failed=True)
+            self.assertNotEqual(good,failed);self.assertEqual(original,digest(good))
+            self.assertIn('_FAILED_second_',failed.name)
     def test_invalid_flags_and_nonfinite_gae(self):
         for flags in ([0,2],[0.,float('nan')],[False,False]):
             if flags==[False,False]:continue

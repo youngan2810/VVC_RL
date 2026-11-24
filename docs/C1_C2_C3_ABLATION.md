@@ -78,3 +78,8 @@ artifacts into this branch. Full preflight exercises the production checkpoint
 save/load and verifies RNG and dual prices. Cache keys bind video/split and
 preprocessing or decoder as appropriate. All changes are mechanical safeguards,
 not optimizer or policy changes. Real-data preflight still requires two GPUs.
+
+At the end of the 40-update schedule, resume with `--updates 0` only if a
+validation is still pending; this performs no PPO updates. Failure exports
+have a separate `_FAILED_<invocation>_SAFE.zip` name; the last consistent SAFE
+is preserved. Preflight checks SHA-256 of every locked mini Train/Val MOV.
