@@ -3,6 +3,7 @@ import hashlib,json,math
 from pathlib import Path
 
 SCHEMA='vvc-rl-qpa-ppo/3'
+CHECKPOINT_SCHEMA='vvc-rl-checkpoint/3'
 TASK='task_retention_f1_v2'
 UPSTREAM='1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f'
 DELTAS=(-2,-1,0,1,2)
@@ -10,13 +11,27 @@ RATES=(50,80,120,160,200)
 W,H,FPS,CTU=480,320,30,128
 NY,NX,N=3,4,12
 FB=W*H*3//2
+LEGACY_STATE='legacy-v1'
+FEEDBACK_STATE='encoder-feedback-v1'
+STATE_SHAPES={LEGACY_STATE:(8,15),FEEDBACK_STATE:(11,18)}
+
+def state_shape(version=LEGACY_STATE):
+    if version not in STATE_SHAPES:raise ValueError('Unknown state schema: '+str(version))
+    return STATE_SHAPES[version]
+
+REWARD_VERSIONS=('task-budget-v2','paired-linear-v1','task-budget-v3-progressive','task-budget-v2-soft-iou','task-budget-v3-progressive-soft-iou')
+UTILITY_SCHEMA='teacher-f1-and-matched-iou/1'
 
 @dataclass(frozen=True)
 class RewardConfig:
     version:str='task-budget-v2'
     rate_tolerance:float=.02
+    @property
+    def progressive(self):return self.version in ('task-budget-v3-progressive','task-budget-v3-progressive-soft-iou')
+    @property
+    def utility(self):return 'matched_iou_f1_v1' if self.version.endswith('-soft-iou') else TASK
     def validate(self):
-        if self.version not in ('task-budget-v2','paired-linear-v1') or not 0<=self.rate_tolerance<=.1:
+        if self.version not in REWARD_VERSIONS or not 0<=self.rate_tolerance<=.1:
             raise ValueError('Unknown reward version or invalid bitrate tolerance')
         return self
 

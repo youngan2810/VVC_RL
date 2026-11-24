@@ -18,12 +18,13 @@ namespace vvenc { namespace QpaProbe {
 inline const char* env(const char* key) { const char* s=std::getenv(key); return s ? s : ""; }
 inline bool enabled() { return *env("VVENC_QPA_PROBE_TRACE") != 0; }
 inline std::mutex& guard() { static std::mutex m; return m; }
+inline std::ofstream& trace_stream() { static std::ofstream out(env("VVENC_QPA_PROBE_TRACE")); return out; }
 inline void row(const char* stage,int poc,int ctu,int x,int y,int w,int h,
                 double before,double after,double lb=0,double la=0,double a=0,double b=0) {
   if (!enabled()) return;
   if(std::string(stage)=="activity") VvcRl::activity(poc,ctu,a);
   std::lock_guard<std::mutex> lock(guard());
-  static std::ofstream out(env("VVENC_QPA_PROBE_TRACE"));
+  auto& out=trace_stream();
   static bool header=false;
   if (!out) throw std::runtime_error("Cannot write QPA diagnostic trace");
   if (!header) { out<<"stage,poc,ctu,x,y,w,h,qp_before,qp_after,lambda_before,lambda_after,aux_a,aux_b\n";header=true; }
@@ -69,5 +70,7 @@ template<class Buf> inline void recon(int poc,const Buf& buf) {
   if(!f)throw std::runtime_error("Cannot write diagnostic reconstruction");
   for(int c=0;c<3;++c){const auto& p=buf.bufs[c];for(int y=0;y<p.height;++y)
     f.write(reinterpret_cast<const char*>(p.buf+y*p.stride),p.width*sizeof(*p.buf));}
+  // Observation-only feedback: publish completed winning rows before the AU outcome.
+  if(enabled() && *env("VVCRL_FEEDBACK")){std::lock_guard<std::mutex> lock(guard());auto& out=trace_stream();out.flush();if(!out)throw std::runtime_error("Cannot flush winning CU feedback");}
 }
 } }

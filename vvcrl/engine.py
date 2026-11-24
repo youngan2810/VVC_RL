@@ -3,9 +3,10 @@ import gzip,csv,json,os,subprocess,time,uuid
 from pathlib import Path
 import numpy as np
 from .config import Profile,FB,W,H,atomic_json,digest
+from .feedback import WinningTrace
 
 class NativeProcess:
-    def __init__(self,encoder,source,folder,profile,rate,timeout=300):
+    def __init__(self,encoder,source,folder,profile,rate,timeout=300,*,feedback=False):
         self.folder=Path(folder);self.folder.mkdir(parents=True,exist_ok=False)
         self.profile=profile.validate();self.rate=rate;self.timeout=timeout;self.k=0;self.bits=0;self.seen=set();self.episode=uuid.uuid4().hex
         self.bridge=self.folder/'bridge';self.bridge.mkdir();self.recon=self.folder/'recon';self.recon.mkdir()
@@ -13,6 +14,8 @@ class NativeProcess:
         env={k:v for k,v in os.environ.items() if not k.startswith(('VVCRL_','VVENC_QPA_PROBE_','VVENC_RCDOT_','VVENC_RL_'))}
         env.update(VVCRL_SESSION_DIR=str(self.bridge.resolve()),VVCRL_EPISODE=self.episode,
           VVENC_QPA_PROBE_TRACE=str((self.folder/'trace.csv').resolve()),VVENC_QPA_PROBE_RECON=str(self.recon.resolve()))
+        self.feedback=WinningTrace(self.folder/'trace.csv') if feedback else None
+        if feedback:env['VVCRL_FEEDBACK']='1'
         if os.name=='nt' and Path('C:/msys64/ucrt64/bin').is_dir():env['PATH']='C:/msys64/ucrt64/bin;'+env.get('PATH','')
         self.command=profile.command(Path(encoder).resolve(),Path(source).resolve(),self.stream.resolve(),rate)
         atomic_json(self.folder/'command.json',self.command)
@@ -45,6 +48,7 @@ class NativeProcess:
         if out['poc']!=self.current['poc'] or out['bits']<=0 or out['bits_total']!=self.bits+out['bits']:raise ValueError('Native AU accounting mismatch')
         p=self.recon/f"{out['poc']}.yuv";b=p.read_bytes()
         if len(b)!=FB*2:raise ValueError('Native reconstruction shape/bitdepth mismatch')
+        if self.feedback is not None:out['winning_qp']=self.feedback.completed(out['poc']).tolist()
         self.bits=out['bits_total'];self.seen.add(out['poc']);self.k+=1
         return out,np.frombuffer(b,dtype='<u2').copy()
     def finish(self):

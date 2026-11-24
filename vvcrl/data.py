@@ -14,12 +14,15 @@ def prepared_clip(input_root,cache,video,frames,detector,split):
     catalog=VideoCatalog(input_root,mode='mini',seed=20261111)
     if split not in ('train','val') or video not in catalog.selected[split]:raise ValueError('Video is not in the locked permitted split')
     source=catalog.source(video)
-    key=hashlib.sha256(canonical({'mov':digest(source),'frames':frames,'start':0,'detector':DETECTOR_ID}).encode()).hexdigest()
+    cache_contract={'video':video,'split':split,'mov':digest(source),'frames':frames,'start':0,'detector':DETECTOR_ID,'preprocessing':catalog.lock['preprocessing']}
+    key=hashlib.sha256(canonical(cache_contract).encode()).hexdigest()
     folder=Path(cache)/key;folder.mkdir(parents=True,exist_ok=True);yuv=folder/'source.yuv';meta=folder/'cache.json'
     if meta.exists():
         m=json.loads(meta.read_text())
-        if digest(yuv)!=m['source_sha256'] or digest(folder/'boxes.json')!=m['boxes_sha256']:raise ValueError('Source/teacher cache corrupted')
-        return yuv,json.loads((folder/'boxes.json').read_text()),key
+        if m.get('contract')!=cache_contract or yuv.stat().st_size!=frames*FB or digest(yuv)!=m['source_sha256'] or digest(folder/'boxes.json')!=m['boxes_sha256']:raise ValueError('Source/teacher cache corrupted or incompatible')
+        boxes=json.loads((folder/'boxes.json').read_text())
+        if len(boxes)!=frames:raise ValueError('Source teacher cache POC count mismatch')
+        return yuv,boxes,key
     started=time.perf_counter()
     if catalog.prepare(video,yuv,frames)!=frames:raise ValueError('Locked source window shorter than required')
     preprocess_seconds=time.perf_counter()-started;started=time.perf_counter()
@@ -28,6 +31,6 @@ def prepared_clip(input_root,cache,video,frames,detector,split):
     finally:raw._mmap.close()
     atomic_json(folder/'boxes.json',boxes)
     source_detector_seconds=time.perf_counter()-started
-    atomic_json(meta,{'video':video,'split':split,'source_sha256':digest(yuv),'boxes_sha256':digest(folder/'boxes.json'),'frames':frames,'detector':DETECTOR_ID,
+    atomic_json(meta,{'contract':cache_contract,'video':video,'split':split,'source_sha256':digest(yuv),'boxes_sha256':digest(folder/'boxes.json'),'frames':frames,'detector':DETECTOR_ID,
       'timing':{'preprocess_seconds':preprocess_seconds,'source_detector_ms_per_frame':source_detector_seconds*1000/frames,'source_detector_timing_note':'Includes conversion/inference/host transfer; cached runs reuse these measurements'}})
     return yuv,boxes,key
