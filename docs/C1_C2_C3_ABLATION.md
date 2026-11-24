@@ -83,3 +83,11 @@ At the end of the 40-update schedule, resume with `--updates 0` only if a
 validation is still pending; this performs no PPO updates. Failure exports
 have a separate `_FAILED_<invocation>_SAFE.zip` name; the last consistent SAFE
 is preserved. Preflight checks SHA-256 of every locked mini Train/Val MOV.
+
+Final audit: mandatory episode seal members, native verification and actual
+stream byte accounting are checked on reuse; duplicate rollout folders and
+wrong sampling modes are rejected. A resumable SAFE is published before
+long validation. The CPU orchestration regression exercises real PPO, all five
+variant settings, export/import, resume and validation with mocked collection;
+it cannot authorize real-data training. Preflight exports mechanical transition
+signals for independent GAE replay.

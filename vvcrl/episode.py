@@ -16,6 +16,7 @@ def cache_identity(source,profile,rate,encoder,detector_identity,boxes):
 def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=RewardConfig(),state_version=LEGACY_STATE,reward_scale=100.):
     if not np.isfinite(reward_scale) or reward_scale<=0:raise ValueError('Invalid reward scale')
     reward_config.validate();state_shape(state_version)
+    if model is not None and fixed is not None:raise ValueError('Choose a policy or fixed control, not both')
     if model is not None and model.state_version!=state_version:raise ValueError('Episode/model state schema mismatch')
     if split not in ('train','val'):raise ValueError('This research runner does not select from Test')
     if not verify:raise ValueError('Independent decoder verification cannot be disabled')
@@ -27,7 +28,9 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
     if split!='train' and not deterministic and fixed is None:raise ValueError('Validation policy must be deterministic')
     progress=ProgressiveBudget(profile.frames,rate*1000*profile.frames/30,reward_config,anchor) if reward_config.progressive else None
     before=model_hash(model) if model is not None else None
-    proc=NativeProcess(encoder,source,folder,profile,rate,feedback=state_version==FEEDBACK_STATE);state=StateBuilder(source,boxes,profile.frames,rate,price,state_version)
+    state=StateBuilder(source,boxes,profile.frames,rate,price,state_version)
+    try:proc=NativeProcess(encoder,source,folder,profile,rate,feedback=state_version==FEEDBACK_STATE)
+    except BaseException:state.close();raise
     batch={k:[] for k in ('x','g','actions','log_prob','value','reward','done','aux_target','aux_weight')};records=[];by_poc={};occupancies=[];timing={'state':0.,'decision':0.,'encode_handshake':0.,'decoded_detector':0.}
     try:
         for k in range(profile.frames):
@@ -104,7 +107,14 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
 def verified_result(folder):
     folder=Path(folder);seal=folder/'SEAL.json'
     if not seal.exists():return None
-    for n,h in json.loads(seal.read_text()).items():
+    manifest=json.loads(seal.read_text())
+    required={'result.json','frames.json','rollout.npz','stream.266','trace.csv','command.json','encoder.log','decoder.log'}
+    if not isinstance(manifest,dict) or not required<=set(manifest):raise ValueError('Episode seal lacks mandatory evidence')
+    if (folder/'collector.json').exists() and 'collector.json' not in manifest:raise ValueError('Unsealed collector metadata')
+    for n,h in manifest.items():
         p=(folder/n).resolve()
         if not p.is_relative_to(folder.resolve()) or not p.is_file() or digest(p)!=h:raise ValueError('Episode evidence corrupted: '+str(p))
-    return json.loads((folder/'result.json').read_text())
+    result=json.loads((folder/'result.json').read_text())
+    if result['bitstream_sha256']!=manifest['stream.266'] or result['bits']!=(folder/'stream.266').stat().st_size*8:raise ValueError('Episode bitstream evidence/accounting mismatch')
+    if result.get('decoder_native_parity') is not True or result.get('action_audit',{}).get('qg_mapping_verified') is not True or result.get('action_audit',{}).get('winning_coverage_verified') is not True:raise ValueError('Episode native verification missing')
+    return result

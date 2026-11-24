@@ -7,7 +7,7 @@ import torch
 from .config import Profile,RewardConfig,atomic_json,canonical,digest,LEGACY_STATE,UTILITY_SCHEMA,state_shape,NY,NX
 from .model import ActorCritic,model_hash
 from .data import DETECTOR_ID,open_detector,prepared_clip
-from .episode import run_episode,verified_result
+from .episode import run_episode,verified_result,cache_identity
 from .controls import roi_action,roi_pair_action
 
 def anchor_episode(spec,detector,source,boxes,profile):
@@ -16,7 +16,8 @@ def anchor_episode(spec,detector,source,boxes,profile):
     for p in sorted(base.glob('attempt*')):
         r=verified_result(p)
         if r is not None:
-            if r['split']!=spec['split'] or r['reward_config']!=asdict(RewardConfig(**spec.get('reward_config',{}))) or r['reward_scale']!=spec.get('reward_scale',100.):raise ValueError('Anchor cache contract mismatch')
+            if r['split']!=spec['split'] or r['reward_config']!=asdict(RewardConfig(**spec.get('reward_config',{}))) or r['reward_scale']!=spec.get('reward_scale',100.) or r['identity']!=cache_identity(source,profile,spec['rate'],spec['encoder'],DETECTOR_ID,boxes):raise ValueError('Anchor cache contract mismatch')
+            if r['model_sha256'] is not None or r['requested_action_distribution'].get('0')!=1. or r['anchor_bits']!=r['bits'] or r['anchor_quality']!=r['task_retention_f1_v2']:raise ValueError('Cached anchor is not a verified no-op')
             return r
     folder=base/f'attempt{len(list(base.glob("attempt*"))):03}'
     r,_=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
@@ -68,6 +69,7 @@ def collect(specs):
 
 def load_batches(results,*,expected_split=None,state_version=None,reward_config=None,reward_scale=None,expected_model=None):
     if not results:raise ValueError('Empty rollout batch')
+    if len({str(Path(r['folder']).resolve()) for r in results})!=len(results):raise ValueError('Duplicate rollout episode')
     records=[];contracts=[]
     for r in results:
         proof=verified_result(r['folder'])
@@ -81,6 +83,7 @@ def load_batches(results,*,expected_split=None,state_version=None,reward_config=
         if expected_model is not None and proof['model_sha256']!=expected_model:raise ValueError('Rollout is not from the current policy')
         contracts.append((proof['split'],version,canonical(cfg),scale,proof['model_sha256']))
         with np.load(Path(r['folder'])/'rollout.npz',allow_pickle=False) as z:record={k:z[k].copy() for k in z.files}
+        if expected_split is not None and proof.get('deterministic',expected_split=='val')!=(expected_split=='val'):raise ValueError('Rollout sampling mode differs from split')
         n=proof['identity']['profile']['frames']
         if record['x'].shape!=(n,sc,NY,NX) or record['g'].shape!=(n,gc) or record['done'].shape!=(n,) or not record['done'][-1] or record['done'][:-1].any():raise ValueError('Rollout tensor/complete episode contract mismatch')
         records.append(record)

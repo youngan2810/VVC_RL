@@ -172,6 +172,8 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
               'schedule_mode':train_schedule,'ppo_config':asdict(ppo_config),'completed':[{'video':r['video'],'rate':r['result']['rate'],'bits':r['result']['bits'],'budget':r['result']['budget'],'quality':r['result']['task_retention_f1_v2'],'task_utility':r['result']['task_utility'],'utility_version':r['result']['utility_version']} for r in rows]})
             pending=iteration%val_every==0
             publish(pending)
+            # Publish a resumable boundary before an expensive validation.
+            if pending:export_training_run(output,invocation)
             if pending:pending=not finish_validation()
             export_training_run(output,invocation)
             print('MINI_UPDATE_COMPLETE',iteration,episodes,stats,'validation_pending',pending,flush=True)

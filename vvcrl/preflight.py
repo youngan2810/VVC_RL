@@ -42,7 +42,7 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         train=collect(specs(catalog.selected['train'][:2],'train',snapshot,model,'mechanical_train'))
         if {r['device'] for r in train}!={'cuda:0','cuda:1'} or len({r['pid'] for r in train})!=2:raise ValueError('Two-GPU collection contract failed')
         checks['two_gpu_collectors']=True;checks['real_train_rollout']=True
-        before=model_hash(model);batch=load_batches(train,expected_split='train',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=before);stats=ppo.update(batch)
+        before=model_hash(model);batch=load_batches(train,expected_split='train',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=before);stats=ppo.update(batch,diagnostics_path=output/'MECHANICAL_SIGNALS.npz')
         checks['logprob_value_replay']=stats['replay_logprob_error']<=2e-5 and stats['replay_value_error']<=2e-5
         # Entropy alone can change Actor weights: require a nonzero policy-loss
         # gradient as well. This is still a mechanism check, not useful learning.
