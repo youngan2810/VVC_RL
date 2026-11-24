@@ -66,7 +66,7 @@ class EndToEndTests(unittest.TestCase):
             with self.subTest(version=version,reward=reward_version),tempfile.TemporaryDirectory() as tmp:
                 root=Path(tmp);cfg=RewardConfig(reward_version);bind={'state_version':version,'reward':asdict(cfg),'ppo':asdict(PPOConfig())}
                 def run(out,updates,resume=None):
-                    return train.mini_train(root,out,root/'gate',{},root,root,updates=updates,val_every=1,profile=Profile(frames=32),seed=20261120,authorized=True,resume=resume,reward_config=cfg,state_version=version)
+                    return train.mini_train(root,out,root/'gate',{'encoder':'fixture_encoder','decoder':'fixture_decoder'},root,root,updates=updates,val_every=1,profile=Profile(frames=32),seed=20261120,authorized=True,resume=resume,reward_config=cfg,state_version=version)
                 with patch('vvcrl.train.binding',return_value=bind),patch('vvcrl.train.require_gate'),patch('vvcrl.train.VideoCatalog',MockCatalog),patch('vvcrl.train.collect',side_effect=fixture_collect):
                     a=root/'uninterrupted';self.assertEqual(run(a,2)['iteration'],2)
                     b=root/'first';self.assertEqual(run(b,1)['iteration'],1)
