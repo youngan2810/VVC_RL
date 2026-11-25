@@ -2,7 +2,7 @@ from dataclasses import asdict
 from pathlib import Path
 import numpy as np
 import torch
-from .config import PPOConfig,D_STATES,ISOLATED_STATES
+from .config import PPOConfig,D_STATES,ISOLATED_STATES,REGION_STATES
 
 def gae(rewards,values,terminated,gamma=1.,lam=.95,last_value=0.):
     r=np.asarray(rewards,np.float32);v=np.asarray(values,np.float32);d=np.asarray(terminated,bool)
@@ -53,6 +53,26 @@ def policy_state_diagnostics(model,batch):
         g=torch.as_tensor(batch['g'],dtype=torch.float32)
         actions=torch.as_tensor(batch['actions'],dtype=torch.long)
         return head_diagnostics(model.evaluate(x,g,actions))
+
+def diagnostic_groups(model):
+    groups={'actor_spatial':model.spatial,'actor_global':model.global_net,'original_head':model.actor,
+            'critic_spatial':model.critic_spatial,'critic_global':model.critic_global,
+            'value_head':model.critic,'auxiliary':model.auxiliary}
+    if model.state_version in REGION_STATES:
+        groups.update(roi_residual=model.region_heads[0],bg_residual=model.region_heads[1])
+    return {k:list(v.parameters()) for k,v in groups.items()}
+
+def norm_of(grads):
+    return sum(float(g.detach().square().sum()) for g in grads if g is not None)**.5
+
+def residual_mechanics_ok(model,stats):
+    """Check policy-loss signal and parameter change, not useful learning."""
+    if model.state_version not in REGION_STATES:return True
+    for name,region in (('roi_residual','roi'),('bg_residual','background')):
+        if stats['learning_diagnostics']['head_behavior_before_update'][region]['active_frames']:
+            if not (stats['module_diagnostics'][name]['policy_loss_grad_norm_mean']>0 and
+                    stats['module_diagnostics'][name]['parameter_max_change']>0):return False
+    return True
 
 class PPO:
     def __init__(self,model,config=PPOConfig()):
@@ -109,6 +129,10 @@ class PPO:
             factor_active=replay['active_factors'].cpu().numpy()
         if not np.isfinite([replay_error,value_error]).all() or replay_error>2e-5 or value_error>2e-5:raise ValueError('Collector policy/value differs from optimizer before update')
         before_actor=m.actor.weight.detach().clone();before_critic=m.critic[-1].weight.detach().clone();metrics=[];stopped=False
+        groups=diagnostic_groups(m) if m.state_version in D_STATES else {}
+        group_before={k:[p.detach().clone() for p in ps] for k,ps in groups.items()}
+        group_metrics={k:[] for k in groups}
+        policy_params=m.actor_parameters() if groups else list(m.actor.parameters())
         for epoch in range(c.epochs):
             for idx in torch.randperm(len(x)).split(c.minibatch):
                 out=m.evaluate(x[idx],g[idx],a[idx]);log_ratio=out['log_prob']-old_log[idx];ratio=log_ratio.exp()
@@ -121,9 +145,17 @@ class PPO:
                 entropy=out['entropy_mean'].mean()
                 loss=policy+c.value_coef*value-c.entropy_coef*entropy+c.auxiliary_coef*aux
                 if not torch.isfinite(loss):raise ValueError('Nonfinite PPO objective')
-                policy_grads=torch.autograd.grad(policy,list(m.actor.parameters()),retain_graph=True,allow_unused=True)
-                policy_grad_norm=sum(float(v.detach().square().sum()) for v in policy_grads if v is not None)**.5
+                policy_grads=torch.autograd.grad(policy,policy_params,retain_graph=True,allow_unused=True)
+                pg=dict(zip(map(id,policy_params),policy_grads))
+                policy_grad_norm=norm_of(pg.get(id(p)) for p in m.actor.parameters())
+                # Measure entropy separately, before clipping; no optimizer mutation.
+                eg={}
+                if groups:
+                    eg=dict(zip(map(id,policy_params),torch.autograd.grad(-c.entropy_coef*entropy,policy_params,retain_graph=True,allow_unused=True)))
                 self.optimizer.zero_grad(set_to_none=True);loss.backward()
+                for name,ps in groups.items():
+                    group_metrics[name].append((norm_of(pg.get(id(p)) for p in ps),
+                        norm_of(eg.get(id(p)) for p in ps),norm_of(p.grad for p in ps)))
                 actor_grad=critic_grad=None
                 if self.isolated:
                     actor_grad=float(torch.nn.utils.clip_grad_norm_(m.actor_parameters(),c.max_grad,error_if_nonfinite=True))
@@ -139,7 +171,14 @@ class PPO:
             if stopped:break
         if not metrics:raise ValueError('PPO made no optimizer steps')
         stats={k:float(np.mean([r[k] for r in metrics])) for k in metrics[0]}
-        if m.state_version in D_STATES:stats['independent_gradient_clipping']=self.isolated
+        if m.state_version in D_STATES:
+            stats['independent_gradient_clipping']=self.isolated
+            stats['module_diagnostics']={name:{
+                'policy_loss_grad_norm_mean':float(np.mean([r[0] for r in group_metrics[name]])),
+                'weighted_entropy_grad_norm_mean':float(np.mean([r[1] for r in group_metrics[name]])),
+                'total_preclip_grad_norm_mean':float(np.mean([r[2] for r in group_metrics[name]])),
+                'parameter_max_change':max(float((p.detach()-old).abs().max()) for p,old in zip(ps,group_before[name]))
+                } for name,ps in groups.items()}
         stats.update(optimizer_steps=len(metrics),early_stop=stopped,replay_logprob_error=replay_error,replay_value_error=value_error,
           actor_head_change=float((m.actor.weight-before_actor).abs().max().detach()),critic_head_change=float((m.critic[-1].weight-before_critic).abs().max().detach()),learning_diagnostics=learning)
         if diagnostics_path is not None:

@@ -6,7 +6,7 @@ import torch
 from .config import Profile,PPOConfig,RewardConfig,atomic_json,digest,LEGACY_STATE
 from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash
-from .ppo import PPO
+from .ppo import PPO,residual_mechanics_ok
 from .collect import collect,load_batches
 from .gates import MANDATORY,binding,write_gate
 from .native_smoke import run_smoke
@@ -46,7 +46,7 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         checks['logprob_value_replay']=stats['replay_logprob_error']<=2e-5 and stats['replay_value_error']<=2e-5
         # Entropy alone can change Actor weights: require a nonzero policy-loss
         # gradient as well. This is still a mechanism check, not useful learning.
-        checks['actor_head_updated']=stats['actor_head_change']>0 and stats['policy_head_gradient_norm']>0
+        checks['actor_head_updated']=stats['actor_head_change']>0 and stats['policy_head_gradient_norm']>0 and residual_mechanics_ok(model,stats)
         checks['critic_head_updated']=stats['critic_head_change']>0
         checks['reward_identity']=all(r['result']['reward_identity_error']<1e-10 for r in train)
         atomic_json(output/'PPO_MECHANICAL_UPDATE.json',{'before':before,'after':model_hash(model),'stats':stats,'ppo_config':asdict(ppo_config),'train_schedule':train_schedule,'scope':'one train-only update; not evidence of useful policy'})

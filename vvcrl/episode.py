@@ -90,6 +90,13 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
         if not np.isclose(raw,expected,rtol=0,atol=1e-10):raise ValueError('Reward sum does not equal clip objective')
         if not np.isclose(sum(r['reward']['train'] for r in records),reward_scale*expected,rtol=0,atol=1e-8):raise ValueError('Scaled reward sum does not equal clip objective')
         result['raw_return']=raw;result['reward_identity_error']=abs(raw-expected)
+        if state_version in D_STATES and progress is not None:
+            phase={}
+            for rec,g in zip(records,batch['g']):
+                key=str(int(round(float(g[6])*7)));z=rec['reward'];v=phase.setdefault(key,{'frames':0,'penalty_steps':0,'refund_steps':0,'bit_component_sum':0.,'excess_bits_max':0.})
+                v['frames']+=1;v['penalty_steps']+=int(z['bit_component']<0);v['refund_steps']+=int(z['bit_component']>0)
+                v['bit_component_sum']+=z['bit_component'];v['excess_bits_max']=max(v['excess_bits_max'],z['excess_bits'])
+            result['reward_by_temporal_layer']=phase
         terminal_only=not reward_config.progressive and reward_config.version!='paired-linear-v1'
         result['terminal_rate_penalty_count']=sum(r['reward']['bit_component']!=0 for r in records) if terminal_only else None
         if terminal_only and any(r['reward']['bit_component']!=0 for r in records[:-1]):raise ValueError('V2 bitrate penalty must occur only at the final coding step')

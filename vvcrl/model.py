@@ -83,6 +83,8 @@ class ActorCritic(nn.Module):
         active=masks.any(-1)
         raw=self.actor(z).reshape(batch,2,5,N)
         factor_logits=(raw*weights[:,:,None,:]).sum(-1)/weights.sum(-1,keepdim=True).clamp_min(1e-8)
+        base_logits=factor_logits
+        residual_logits=torch.zeros_like(base_logits)
         if self.state_version in REGION_STATES:
             def region_pool(v):
                 return torch.einsum('bcn,bhn->bhc',v.reshape(batch,v.shape[1],N),weights)/weights.sum(-1,keepdim=True).clamp_min(1e-8)
@@ -91,7 +93,8 @@ class ActorCritic(nn.Module):
             global_context=z[:,32:,0,0]
             fractions=weights.sum(-1)/area.sum(-1,keepdim=True)
             context=torch.cat([learned,global_context,raw_context,g,fractions,active.to(z.dtype)],1)
-            factor_logits=factor_logits+torch.stack([head(context) for head in self.region_heads],1)
+            residual_logits=torch.stack([head(context) for head in self.region_heads],1)
+            factor_logits=base_logits+residual_logits
         dist=Categorical(logits=factor_logits)
         if actions is None:
             factors=factor_logits.argmax(-1) if deterministic else dist.sample()
@@ -115,7 +118,7 @@ class ActorCritic(nn.Module):
         aux=self.auxiliary(torch.cat([z,onehot],1)).squeeze(1)
         return {'actions':actions,'log_prob':logp,'value':self.critic(pool).squeeze(-1),
           'entropy_joint':entropy.sum(-1),'entropy_mean':entropy.sum(-1)/active.sum(-1).clamp_min(1),
-          'logits':logits,'factor_logits':factor_logits,'factor_actions':factors,'active_factors':active,'aux_logits':aux}
+          'logits':logits,'factor_logits':factor_logits,'base_factor_logits':base_logits,'residual_factor_logits':residual_logits,'factor_actions':factors,'active_factors':active,'aux_logits':aux}
     def act(self,x,g,deterministic=False):
         with torch.inference_mode():
             result=self.evaluate(torch.as_tensor(x).unsqueeze(0),torch.as_tensor(g).unsqueeze(0),deterministic=deterministic)

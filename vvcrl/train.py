@@ -12,6 +12,7 @@ from .validation import validation_summary,rollout_summary
 from .collect import collect,load_batches
 from .gates import binding,require_gate
 from .artifacts import export_run
+from .policy_diagnostics import validation_policy_diagnostics
 
 def mixed_train_schedule(videos,rates=RATES,*,seed=20261120):
     """Deterministic seeded interleaving: one video per round and every video/rate once.
@@ -146,9 +147,13 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
         if model_hash(model)!=before:raise ValueError('Validation changed model')
         report=validation_summary(validation,val_items,reward_config)
         score=report['macro_delta_quality']
+        val_batch=load_batches(validation,expected_split='val',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=before) if validation else None
         report.update(model_unchanged=True,model_sha256=before,rollout_diagnostics=rollout_summary(validation),
                       ppo_config=asdict(ppo.config),train_schedule=train_schedule,
-                      policy_head_state_diagnostics=policy_state_diagnostics(model,load_batches(validation,expected_split='val',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=before)) if validation else {})
+                      policy_head_state_diagnostics=policy_state_diagnostics(model,val_batch) if validation else {})
+        if state_version in D_STATES and validation:
+            report['state_sensitivity']=validation_policy_diagnostics(model,val_batch,validation,reward_config)
+            if model_hash(model)!=before:raise ValueError('State diagnostics modified policy')
         atomic_json(output/'validations'/f'{iteration:06}.json',report)
         if not report['complete']:return False
         if state_version in D_STATES and report['eligible_utility_checkpoint']:
