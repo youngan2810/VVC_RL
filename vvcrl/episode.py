@@ -2,7 +2,7 @@ from dataclasses import asdict
 from pathlib import Path
 import hashlib,json,time,shutil,gzip
 import numpy as np
-from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical,LEGACY_STATE,FEEDBACK_STATE,state_shape,UTILITY_SCHEMA
+from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical,LEGACY_STATE,FEEDBACK_STATE,state_shape,UTILITY_SCHEMA,uses_feedback,D_STATES,validate_experiment
 from .engine import NativeProcess,verify_decode,audit_trace
 from .state import StateBuilder
 from .metrics import task,summary
@@ -16,6 +16,7 @@ def cache_identity(source,profile,rate,encoder,detector_identity,boxes):
 def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=RewardConfig(),state_version=LEGACY_STATE,reward_scale=100.):
     if not np.isfinite(reward_scale) or reward_scale<=0:raise ValueError('Invalid reward scale')
     reward_config.validate();state_shape(state_version)
+    if model is not None or state_version in D_STATES:validate_experiment(state_version,reward_config)
     if model is not None and fixed is not None:raise ValueError('Choose a policy or fixed control, not both')
     if model is not None and model.state_version!=state_version:raise ValueError('Episode/model state schema mismatch')
     if split not in ('train','val'):raise ValueError('This research runner does not select from Test')
@@ -28,8 +29,8 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
     if split!='train' and not deterministic and fixed is None:raise ValueError('Validation policy must be deterministic')
     progress=ProgressiveBudget(profile.frames,rate*1000*profile.frames/30,reward_config,anchor) if reward_config.progressive else None
     before=model_hash(model) if model is not None else None
-    state=StateBuilder(source,boxes,profile.frames,rate,price,state_version)
-    try:proc=NativeProcess(encoder,source,folder,profile,rate,feedback=state_version==FEEDBACK_STATE)
+    state=StateBuilder(source,boxes,profile.frames,rate,price,state_version,reward_config)
+    try:proc=NativeProcess(encoder,source,folder,profile,rate,feedback=uses_feedback(state_version))
     except BaseException:state.close();raise
     batch={k:[] for k in ('x','g','actions','log_prob','value','reward','done','aux_target','aux_weight')};records=[];by_poc={};occupancies=[];timing={'state':0.,'decision':0.,'encode_handshake':0.,'decoded_detector':0.}
     try:
@@ -57,7 +58,7 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
               state_sha256=hashlib.sha256(x.tobytes()+g.tobytes()).hexdigest(),mse_y_10bit=mse,reconstruction_sha256=hashlib.sha256(recon.tobytes()).hexdigest())
             if model is not None:
                 record.update(log_probability=lp,value=value,entropy_mean=float(out['entropy_mean']),logits=out['logits'].tolist())
-            if state_version==FEEDBACK_STATE:record['native_feedback']={'poc':poc,'winning_qp':outcome['winning_qp'],'pre_action_ctu_qp':obs['qp']}
+            if uses_feedback(state_version):record['native_feedback']={'poc':poc,'winning_qp':outcome['winning_qp'],'pre_action_ctu_qp':obs['qp']}
             records.append(record);by_poc[str(poc)]={'score':metrics['score'],'matched_iou_f1_v1':metrics['matched_iou_f1_v1'],'bits':outcome['bits']}
             for key,val in [('x',x),('g',g),('actions',actions),('log_prob',lp),('value',value),('reward',rew['train']),('done',k==profile.frames-1),('aux_target',metrics['aux_target']),('aux_weight',metrics['aux_weight'])]:batch[key].append(val)
             state.advance(obs,delta,outcome)
@@ -72,7 +73,7 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
           'mean_delta_background_ctus':float(actions[occ==0].mean()) if (occ==0).any() else None,
           'per_ctu_distribution':[{str(d):float(np.mean(actions[:,i]==d)) for d in DELTAS} for i in range(12)]}
         result['mean_action_entropy']=float(np.mean([r['entropy_mean'] for r in records])) if model is not None else None
-        result.update(identity=identity,state_version=state_version,split=split,rate=rate,budget=state.budget,by_poc=by_poc,model_sha256=before,deterministic=deterministic,
+        result.update(identity=identity,state_version=state_version,split=split,rate=rate,budget=state.budget,by_poc=by_poc,coding_order=[r['poc'] for r in records],model_sha256=before,deterministic=deterministic,
           anchor_bits=anchor['bits'] if anchor is not None else result['bits'],anchor_quality=anchor['task_retention_f1_v2'] if anchor is not None else result['task_retention_f1_v2'],
           psnr_y_10bit=10*np.log10(1023**2/max(np.mean([r['mse_y_10bit'] for r in records]),1e-30)))
         # Mechanical accounting identity, not a claim of learned usefulness.
@@ -85,7 +86,7 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
         expected=objective['raw']
         result.update(reward_config=asdict(reward_config),reward_price=price,reward_scale=float(reward_scale),clip_objective=objective,
           rate_reward_nonzero_steps=sum(r['reward']['bit_component']!=0 for r in records),
-          budget_schedule=('anchor-coding-order-v1' if anchor is not None else 'target-linear-final-correction-v1') if progress is not None else None)
+          budget_schedule=('online-target-terminal-correction-v1' if reward_config.online else ('anchor-coding-order-v1' if anchor is not None else 'target-linear-final-correction-v1')) if progress is not None else None)
         if not np.isclose(raw,expected,rtol=0,atol=1e-10):raise ValueError('Reward sum does not equal clip objective')
         if not np.isclose(sum(r['reward']['train'] for r in records),reward_scale*expected,rtol=0,atol=1e-8):raise ValueError('Scaled reward sum does not equal clip objective')
         result['raw_return']=raw;result['reward_identity_error']=abs(raw-expected)
@@ -115,6 +116,9 @@ def verified_result(folder):
         p=(folder/n).resolve()
         if not p.is_relative_to(folder.resolve()) or not p.is_file() or digest(p)!=h:raise ValueError('Episode evidence corrupted: '+str(p))
     result=json.loads((folder/'result.json').read_text())
+    if 'coding_order' in result:
+        frames=json.loads((folder/'frames.json').read_text())
+        if result['coding_order']!=[r['poc'] for r in frames] or set(map(str,result['coding_order']))!=set(result['by_poc']):raise ValueError('Explicit coding order differs from sealed frame trace')
     if result['bitstream_sha256']!=manifest['stream.266'] or result['bits']!=(folder/'stream.266').stat().st_size*8:raise ValueError('Episode bitstream evidence/accounting mismatch')
     if result.get('decoder_native_parity') is not True or result.get('action_audit',{}).get('qg_mapping_verified') is not True or result.get('action_audit',{}).get('winning_coverage_verified') is not True:raise ValueError('Episode native verification missing')
     return result

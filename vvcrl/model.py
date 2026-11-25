@@ -1,8 +1,8 @@
-import hashlib,io
+import hashlib,io,copy
 import torch
 from torch import nn
 from torch.distributions import Categorical
-from .config import NY,NX,N,LEGACY_STATE,state_shape
+from .config import NY,NX,N,LEGACY_STATE,state_shape,D_STATES,REGION_STATES,D2_NEUTRAL_STATE
 
 class ActorCritic(nn.Module):
     def __init__(self,state_version=LEGACY_STATE):
@@ -36,12 +36,44 @@ class ActorCritic(nn.Module):
                     conv.weight.zero_();conv.weight[:,:8].copy_(self.spatial[0].weight);conv.bias.copy_(self.spatial[0].bias)
                     linear.weight.zero_();linear.weight[:,:15].copy_(self.global_net[0].weight);linear.bias.copy_(self.global_net[0].bias)
                 self.spatial[0]=conv;self.global_net[0]=linear
+        # D1 starts with identical outputs and CPU RNG as Combined. Copy,
+        # never alias, the shared representation for the value/auxiliary path.
+        if state_version in D_STATES:
+            self.critic_spatial=copy.deepcopy(self.spatial)
+            self.critic_global=copy.deepcopy(self.global_net)
+        if state_version in REGION_STATES:
+            # Residual head: preserve the exact initial baseline policy,
+            # then learn nonlinear cross-region corrections. Raw regional
+            # features and global inputs bypass the learned encoders.
+            context_size=64+32+2*spatial_channels+global_channels+4
+            with torch.random.fork_rng(devices=[]):
+                self.region_heads=nn.ModuleList([nn.Sequential(
+                    nn.Linear(context_size,64),nn.Tanh(),nn.Linear(64,5))
+                    for _ in range(2)])
+                for head in self.region_heads:
+                    nn.init.zeros_(head[-1].weight);nn.init.zeros_(head[-1].bias)
+            if state_version==D2_NEUTRAL_STATE:
+                with torch.no_grad():self.actor.bias.zero_()
+
+    def actor_parameters(self):
+        modules=[self.spatial,self.global_net,self.actor]
+        if self.state_version in REGION_STATES:modules.append(self.region_heads)
+        return [p for module in modules for p in module.parameters()]
+
+    def critic_parameters(self):
+        if self.state_version not in D_STATES:raise ValueError('Shared representation has no disjoint critic partition')
+        return [p for module in (self.critic_spatial,self.critic_global,self.critic,self.auxiliary) for p in module.parameters()]
+
+    def _features(self,x,g,spatial,global_net):
+        z=spatial(x);global_z=global_net(g)
+        joined=torch.cat([z,global_z[:,:,None,None].expand(-1,-1,NY,NX)],1)
+        weights=x[:,7:8].clamp_min(1e-8);pooled=(z*weights).sum((2,3))/weights.sum((2,3))
+        return joined,torch.cat([pooled,global_z],1)
+
     def features(self,x,g):
         sc,gc=state_shape(self.state_version)
         if x.ndim!=4 or x.shape[1:]!=(sc,NY,NX) or g.shape!=(len(x),gc):raise ValueError('State schema/model shape mismatch')
-        z=self.spatial(x);global_z=self.global_net(g);joined=torch.cat([z,global_z[:,:,None,None].expand(-1,-1,NY,NX)],1)
-        weights=x[:,7:8].clamp_min(1e-8);pooled=(z*weights).sum((2,3))/weights.sum((2,3))
-        return joined,torch.cat([pooled,global_z],1)
+        return self._features(x,g,self.spatial,self.global_net)
     def evaluate(self,x,g,actions=None,deterministic=False):
         z,pool=self.features(x,g);batch=len(x)
         roi=(x[:,0]>0).reshape(batch,N)
@@ -51,6 +83,15 @@ class ActorCritic(nn.Module):
         active=masks.any(-1)
         raw=self.actor(z).reshape(batch,2,5,N)
         factor_logits=(raw*weights[:,:,None,:]).sum(-1)/weights.sum(-1,keepdim=True).clamp_min(1e-8)
+        if self.state_version in REGION_STATES:
+            def region_pool(v):
+                return torch.einsum('bcn,bhn->bhc',v.reshape(batch,v.shape[1],N),weights)/weights.sum(-1,keepdim=True).clamp_min(1e-8)
+            learned=region_pool(z[:,:32]).flatten(1)
+            raw_context=region_pool(x).flatten(1)
+            global_context=z[:,32:,0,0]
+            fractions=weights.sum(-1)/area.sum(-1,keepdim=True)
+            context=torch.cat([learned,global_context,raw_context,g,fractions,active.to(z.dtype)],1)
+            factor_logits=factor_logits+torch.stack([head(context) for head in self.region_heads],1)
         dist=Categorical(logits=factor_logits)
         if actions is None:
             factors=factor_logits.argmax(-1) if deterministic else dist.sample()
@@ -69,6 +110,8 @@ class ActorCritic(nn.Module):
         entropy=dist.entropy()*active
         logits=torch.where(roi[:,:,None],factor_logits[:,0,None,:],factor_logits[:,1,None,:])
         onehot=nn.functional.one_hot(actions,5).reshape(-1,NY,NX,5).permute(0,3,1,2).to(z.dtype)
+        if self.state_version in D_STATES:
+            z,pool=self._features(x,g,self.critic_spatial,self.critic_global)
         aux=self.auxiliary(torch.cat([z,onehot],1)).squeeze(1)
         return {'actions':actions,'log_prob':logp,'value':self.critic(pool).squeeze(-1),
           'entropy_joint':entropy.sum(-1),'entropy_mean':entropy.sum(-1)/active.sum(-1).clamp_min(1),

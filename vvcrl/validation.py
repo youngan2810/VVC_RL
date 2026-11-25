@@ -30,6 +30,7 @@ def validation_summary(rows,expected_pairs,reward_config=RewardConfig()):
         'selection_metric':'legacy teacher F1 retention (unchanged; not GT-mAP)',
         'quality_regressions':sum(p['delta_quality']<0 for p in detail),
         'eligible_checkpoint':complete and feasible and gain is not None and gain>0,
+        'eligible_utility_checkpoint':complete and feasible and bool(detail) and float(np.mean([p['delta_utility'] for p in detail]))>0,
         'interpretation':'A checkpoint needs complete validation, positive macro F1 gain and every clip within the shared bitrate cap. This is not a Test or ground-truth mAP claim.'}
 
 def rollout_summary(rows):

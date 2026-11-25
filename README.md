@@ -68,3 +68,8 @@ See [docs/VERIFICATION.json](docs/VERIFICATION.json) for actual local checks. Lo
 ## Source and licensing
 
 `vendor/vvenc` includes the full VVenC source at `1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f` with the narrow native integration. `native/originals` and `native/online_manifest.json` preserve the original/modified hashes. Vanilla baseline is restored from those originals; old CTU32 or unrelated binary results must not be substituted. External decoder/detector versions and weights are pinned separately. See [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) and preserved upstream licenses. No models, credentials, videos or historical results are published.
+
+
+## D-series research variants
+
+See [D-series design and controlled training protocol](docs/D_SERIES.md). Existing historical notebooks remain pinned; select D-series explicitly via CLI and run a new full preflight.

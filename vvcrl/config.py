@@ -13,13 +13,39 @@ NY,NX,N=3,4,12
 FB=W*H*3//2
 LEGACY_STATE='legacy-v1'
 FEEDBACK_STATE='encoder-feedback-v1'
-STATE_SHAPES={LEGACY_STATE:(8,15),FEEDBACK_STATE:(11,18)}
+# The version binds the observation AND policy architecture through every
+# collector, gate and checkpoint. Existing C-series identifiers stay unchanged.
+D1_STATE='d1-decoupled-v1'
+D1_ISOLATED_STATE='d1-isolated-v1'
+D2_STATE='d2-region-v1'
+D2_NEUTRAL_STATE='d2-region-neutral-v1'
+D3_STATE='d3-online-budget-v1'
+D_STATES=(D1_STATE,D1_ISOLATED_STATE,D2_STATE,D2_NEUTRAL_STATE,D3_STATE)
+REGION_STATES=(D2_STATE,D2_NEUTRAL_STATE,D3_STATE)
+ISOLATED_STATES=(D1_ISOLATED_STATE,*REGION_STATES)
+STATE_SHAPES={LEGACY_STATE:(8,15),FEEDBACK_STATE:(11,18),
+              **{v:(11,18) for v in D_STATES},D3_STATE:(11,20)}
+
+def uses_feedback(version):
+    state_shape(version)
+    return version!=LEGACY_STATE
+
+ONLINE_REWARD='task-budget-v4-online-soft-iou'
+COMBINED_REWARD='task-budget-v3-progressive-soft-iou'
+
+def validate_experiment(state_version,reward_config):
+    state_shape(state_version);reward_config.validate()
+    if state_version in D_STATES:
+        expected=ONLINE_REWARD if state_version==D3_STATE else COMBINED_REWARD
+        if reward_config.version!=expected:raise ValueError('D-series state/reward binding mismatch')
+    elif reward_config.version==ONLINE_REWARD:
+        raise ValueError('Online reward requires D3 state for policy experiments')
 
 def state_shape(version=LEGACY_STATE):
     if version not in STATE_SHAPES:raise ValueError('Unknown state schema: '+str(version))
     return STATE_SHAPES[version]
 
-REWARD_VERSIONS=('task-budget-v2','paired-linear-v1','task-budget-v3-progressive','task-budget-v2-soft-iou','task-budget-v3-progressive-soft-iou')
+REWARD_VERSIONS=('task-budget-v2','paired-linear-v1','task-budget-v3-progressive','task-budget-v2-soft-iou','task-budget-v3-progressive-soft-iou',ONLINE_REWARD)
 UTILITY_SCHEMA='teacher-f1-and-matched-iou/1'
 
 @dataclass(frozen=True)
@@ -27,7 +53,9 @@ class RewardConfig:
     version:str='task-budget-v2'
     rate_tolerance:float=.02
     @property
-    def progressive(self):return self.version in ('task-budget-v3-progressive','task-budget-v3-progressive-soft-iou')
+    def progressive(self):return self.version in ('task-budget-v3-progressive','task-budget-v3-progressive-soft-iou',ONLINE_REWARD)
+    @property
+    def online(self):return self.version==ONLINE_REWARD
     @property
     def utility(self):return 'matched_iou_f1_v1' if self.version.endswith('-soft-iou') else TASK
     def validate(self):

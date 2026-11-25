@@ -2,7 +2,7 @@ from dataclasses import asdict
 from pathlib import Path
 import numpy as np
 import torch
-from .config import PPOConfig
+from .config import PPOConfig,D_STATES,ISOLATED_STATES
 
 def gae(rewards,values,terminated,gamma=1.,lam=.95,last_value=0.):
     r=np.asarray(rewards,np.float32);v=np.asarray(values,np.float32);d=np.asarray(terminated,bool)
@@ -56,7 +56,17 @@ def policy_state_diagnostics(model,batch):
 
 class PPO:
     def __init__(self,model,config=PPOConfig()):
-        config.validate();self.model,self.config=model,config;self.optimizer=torch.optim.Adam(model.parameters(),lr=config.learning_rate)
+        config.validate();self.model,self.config=model,config
+        self.isolated=model.state_version in ISOLATED_STATES
+        if model.state_version in D_STATES:
+            ap,cp=model.actor_parameters(),model.critic_parameters()
+            if set(map(id,ap)) & set(map(id,cp)) or set(map(id,ap+cp))!=set(map(id,model.parameters())):
+                raise ValueError('Actor/critic parameter partition is not disjoint and exhaustive')
+        # Separate Adam parameter groups have independent per-parameter moments.
+        # D1 retains the original joint clipping to isolate representation;
+        # D1-isolated and later variants use separate clipping budgets.
+        params=[{'params':ap,'name':'actor'},{'params':cp,'name':'critic'}] if self.isolated else model.parameters()
+        self.optimizer=torch.optim.Adam(params,lr=config.learning_rate)
     def update(self,batch,diagnostics_path=None):
         c=self.config;m=self.model
         done_flags=np.asarray(batch['done'])
@@ -113,13 +123,23 @@ class PPO:
                 if not torch.isfinite(loss):raise ValueError('Nonfinite PPO objective')
                 policy_grads=torch.autograd.grad(policy,list(m.actor.parameters()),retain_graph=True,allow_unused=True)
                 policy_grad_norm=sum(float(v.detach().square().sum()) for v in policy_grads if v is not None)**.5
-                self.optimizer.zero_grad(set_to_none=True);loss.backward();grad=torch.nn.utils.clip_grad_norm_(m.parameters(),c.max_grad,error_if_nonfinite=True);self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True);loss.backward()
+                actor_grad=critic_grad=None
+                if self.isolated:
+                    actor_grad=float(torch.nn.utils.clip_grad_norm_(m.actor_parameters(),c.max_grad,error_if_nonfinite=True))
+                    critic_grad=float(torch.nn.utils.clip_grad_norm_(m.critic_parameters(),c.max_grad,error_if_nonfinite=True))
+                    grad=(actor_grad**2+critic_grad**2)**.5
+                else:
+                    grad=torch.nn.utils.clip_grad_norm_(m.parameters(),c.max_grad,error_if_nonfinite=True)
+                self.optimizer.step()
                 if not np.isfinite(policy_grad_norm) or any(not torch.isfinite(p).all() for p in m.parameters()):raise ValueError('Nonfinite optimizer result')
                 metrics.append({'policy_loss':float(policy.detach()),'value_loss':float(value.detach()),'aux_loss':float(aux.detach()),'entropy_mean':float(entropy.detach()),'approx_kl_joint':float(kl.detach()),
                   'clip_fraction':float(((ratio-1).abs()>c.clip).float().mean().detach()),'grad_norm':float(grad),'policy_head_gradient_norm':policy_grad_norm})
+                if self.isolated:metrics[-1].update(actor_preclip_grad_norm=actor_grad,critic_preclip_grad_norm=critic_grad)
             if stopped:break
         if not metrics:raise ValueError('PPO made no optimizer steps')
         stats={k:float(np.mean([r[k] for r in metrics])) for k in metrics[0]}
+        if m.state_version in D_STATES:stats['independent_gradient_clipping']=self.isolated
         stats.update(optimizer_steps=len(metrics),early_stop=stopped,replay_logprob_error=replay_error,replay_value_error=value_error,
           actor_head_change=float((m.actor.weight-before_actor).abs().max().detach()),critic_head_change=float((m.critic[-1].weight-before_critic).abs().max().detach()),learning_diagnostics=learning)
         if diagnostics_path is not None:

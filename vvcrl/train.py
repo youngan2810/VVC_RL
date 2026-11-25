@@ -3,7 +3,7 @@ from pathlib import Path
 import itertools,json,time,uuid,math,sys
 import numpy as np
 import torch
-from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest,LEGACY_STATE,CHECKPOINT_SCHEMA
+from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest,LEGACY_STATE,CHECKPOINT_SCHEMA,D_STATES
 from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash,state_dict_hash
 from .ppo import PPO,policy_state_diagnostics
@@ -151,6 +151,14 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
                       policy_head_state_diagnostics=policy_state_diagnostics(model,load_batches(validation,expected_split='val',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=before)) if validation else {})
         atomic_json(output/'validations'/f'{iteration:06}.json',report)
         if not report['complete']:return False
+        if state_version in D_STATES and report['eligible_utility_checkpoint']:
+            # Secondary diagnostic checkpoint; F1 remains the preregistered
+            # primary criterion and resume always uses latest. Exclude current
+            # iteration so a pending validation can be safely rerun.
+            previous=[json.loads(p.read_text()) for p in (output/'validations').glob('*.json') if int(p.stem)<iteration]
+            prior_best=max([0.]+[r['macro_delta_utility'] for r in previous if r.get('eligible_utility_checkpoint')])
+            if report['macro_delta_utility']>prior_best:
+                save_checkpoint(output/'checkpoints/best_utility.pt',model,ppo,prices,iteration,episodes,bind,best,seed)
         if report['eligible_checkpoint'] and score>best:
             best=score;save_checkpoint(output/'checkpoints/best_validation.pt',model,ppo,prices,iteration,episodes,bind,best,seed)
         publish(False)
