@@ -27,3 +27,11 @@ Check actual historical rate_tolerance from TRAIN_BINDING.json and use it consis
 D-series validation now includes per-episode deterministic feature sensitivity, residual/base centered logit contributions, logit margin, and observed same-video/POC cross-rate comparisons. Probes are model sensitivity, not causal codec evidence. The budget probe recomputes derived features but holds other history fixed. PPO reports module-specific policy, weighted entropy and total preclip gradient norms and parameter changes. Preflight checks active residual heads. Online reward phase statistics are saved per temporal layer. The compact diagnostic mode (`--diagnostic-mode compact` with `diagnose`) runs PPO and three prespecified strong fixed controls on all 12 development video/rate points (48 policy/fixed encodes plus anchors); no-op is inferred from the matched anchor. Rate-specific fixed selection is development-only. SAFE import is streamed and staged; export cadence remains unchanged for safe recovery. Real GPU preflight remains mandatory.
 
 Kaggle notebook: [D-Series Training](../notebooks/VVC_RL_D_Series_Training_Kaggle.ipynb). It pins functional commit `c4bccd19f9d48ee2a8269b94d109d441044e4ff3`, defaults to D1 with preflight only, then 10 updates after explicit enablement. The notebook-only commit does not alter the functional source fingerprint. Use two T4 GPUs. No historical checkpoint reuse.
+
+## Three-session Kaggle workflow
+
+1. [VVC_RL_D_Series_01_Preflight_Kaggle.ipynb](../notebooks/VVC_RL_D_Series_01_Preflight_Kaggle.ipynb)
+2. [VVC_RL_D_Series_02_Train10_Kaggle.ipynb](../notebooks/VVC_RL_D_Series_02_Train10_Kaggle.ipynb)
+3. [VVC_RL_D_Series_03_Resume30_Kaggle.ipynb](../notebooks/VVC_RL_D_Series_03_Resume30_Kaggle.ipynb)
+
+Stage 1 exports a verified gate and exact native binary bundle. Stage 2 imports both and trains to update 10. Stage 3 imports both plus Stage 2 SAFE and resumes to update 40 (30 additional updates). Default D1; keep all settings identical. If a stage hits the session limit, resume its latest non-FAILED SAFE in a fresh session using PARTIAL_STAGE_INPUT. No checkpoint conversion or gate bypass. The original all-in-one notebook is retained.
