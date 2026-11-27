@@ -83,11 +83,13 @@ class EndToEndTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Duplicate rollout'):load_batches([{'folder':'same'},{'folder':'same'}])
     def test_training_export_import_resume_exact(self):
         torch.set_num_threads(1)
-        variants=[(LEGACY_STATE,'task-budget-v2'),(FEEDBACK_STATE,'task-budget-v2'),(LEGACY_STATE,'task-budget-v3-progressive'),(LEGACY_STATE,'task-budget-v2-soft-iou'),(FEEDBACK_STATE,'task-budget-v3-progressive-soft-iou'),(D1_STATE,COMBINED_REWARD),(D1_ISOLATED_STATE,COMBINED_REWARD),(D2_STATE,COMBINED_REWARD),(D2_NEUTRAL_STATE,COMBINED_REWARD),(D3_STATE,ONLINE_REWARD),(D4_STATE,ONLINE_REWARD),(D4_STATE,ONLINE_REWARD,'GT-RD')]
+        variants=[(LEGACY_STATE,'task-budget-v2'),(FEEDBACK_STATE,'task-budget-v2'),(LEGACY_STATE,'task-budget-v3-progressive'),(LEGACY_STATE,'task-budget-v2-soft-iou'),(FEEDBACK_STATE,'task-budget-v3-progressive-soft-iou'),(D1_STATE,COMBINED_REWARD),(D1_ISOLATED_STATE,COMBINED_REWARD),(D2_STATE,COMBINED_REWARD),(D2_NEUTRAL_STATE,COMBINED_REWARD),(D3_STATE,ONLINE_REWARD),(D4_STATE,ONLINE_REWARD),(D4_STATE,ONLINE_REWARD,'GT-RD'),(D4_STATE,ONLINE_REWARD,'GT-RD-MC')]
         for variant in variants:
             version,reward_version=variant[:2];rd=len(variant)==3
             with self.subTest(version=version,reward=reward_version),tempfile.TemporaryDirectory() as tmp:
-                root=Path(tmp);cfg=RewardConfig(reward_version);bind={'state_version':version,'reward':asdict(cfg),'ppo':asdict(PPOConfig())}
+                root=Path(tmp);cfg=RewardConfig(reward_version)
+                pc=PPOConfig(gae_lambda=1. if variant[-1]=='GT-RD-MC' else .95)
+                bind={'state_version':version,'reward':asdict(cfg),'ppo':asdict(pc)}
                 if rd:
                     from vvcrl.config import VALIDATION_SELECTION
                     bind['validation_selection']=VALIDATION_SELECTION
@@ -95,7 +97,7 @@ class EndToEndTests(unittest.TestCase):
                     selected=dict(MockCatalog.selected,val=['val_a','val_b','val_c','val_d']) if rd else MockCatalog.selected
                 gt={v:{'frames':[dict(image_id=i*100+j,video_id=v,poc=j*6,boxes=[[0,0,100,100]]) for j in range(6)]} for i,v in enumerate(Catalog.selected['val'])}
                 def run(out,updates,resume=None):
-                    return train.mini_train(root,out,root/'gate',{'encoder':'fixture_encoder','decoder':'fixture_decoder'},root,root,updates=updates,val_every=1,profile=Profile(frames=32),seed=20261120,authorized=True,resume=resume,reward_config=cfg,state_version=version)
+                    return train.mini_train(root,out,root/'gate',{'encoder':'fixture_encoder','decoder':'fixture_decoder'},root,root,updates=updates,val_every=1,profile=Profile(frames=32),seed=20261120,authorized=True,resume=resume,reward_config=cfg,ppo_config=pc,state_version=version)
                 with patch('vvcrl.train.binding',return_value=bind),patch('vvcrl.train.require_gate'),patch('vvcrl.train.VideoCatalog',Catalog),patch('vvcrl.data.validation_ground_truth',return_value=gt),patch('vvcrl.train.collect',side_effect=rd_fixture_collect if rd else fixture_collect):
                     a=root/'uninterrupted';self.assertEqual(run(a,2)['iteration'],2)
                     b=root/'first';self.assertEqual(run(b,1)['iteration'],1)

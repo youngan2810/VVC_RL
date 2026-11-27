@@ -4,7 +4,8 @@ import numpy as np
 import torch
 from vvcrl.config import D2_STATE,D3_STATE,D4_STATE,ONLINE_STATES,RewardConfig,COMBINED_REWARD,ONLINE_REWARD
 from vvcrl.model import ActorCritic,model_hash
-from vvcrl.ppo import PPO,residual_mechanics_ok
+from vvcrl.ppo import PPO,residual_mechanics_ok,gae,joint_diagnostics
+from vvcrl.config import PPOConfig
 from vvcrl.policy_diagnostics import validation_policy_diagnostics
 from vvcrl.artifacts import export_run,import_run
 from vvcrl.diagnose import rate_conditioned_fixed
@@ -59,3 +60,66 @@ class DiagnosticsTests(unittest.TestCase):
             return dict(rate=50,task_retention_f1_v2=.6+gain,anchor_quality=.6,anchor_bits=100,clip_objective={'within_cap':ok,'budget_cap_bits':102})
         got=rate_conditioned_fixed({'ppo':[row(.2,True)],'roi_m1_bg_p1':[row(.1,True)],'roi_m2_bg_p1':[row(.3,False)]},[50,200])
         self.assertEqual(got['50']['control'],'roi_m1_bg_p1');self.assertIsNone(got['200']['control'])
+
+    def test_full_clip_credit_keeps_delayed_reward_and_ignores_future_values(self):
+        # Exact delayed-credit arithmetic, NOT a claim about real encoder Q.
+        r=np.zeros(256,np.float32);r[-1]=1.;v=np.zeros_like(r)
+        done=np.zeros(256,bool);done[-1]=True
+        short,_=gae(r,v,done,1.,.95);full,ret=gae(r,v,done,1.,1.)
+        self.assertLess(short[0],3e-6);np.testing.assert_array_equal(ret,np.ones(256,np.float32))
+        np.testing.assert_array_equal(full,ret)
+        v[1:]=np.linspace(-100,100,255)
+        a,target=gae(r,v,done,1.,1.)
+        np.testing.assert_array_equal(target,ret);self.assertEqual(a[0],full[0])
+        # No return/terminal cost may leak into the preceding clip.
+        _,ret=gae([0,1,0,-2],[7,8,9,10],[False,True,False,True],1.,1.,999)
+        np.testing.assert_array_equal(ret,[1,1,-2,-2])
+        _,ret=gae([1,2],[9,8],[False,False],.5,1.,4)
+        np.testing.assert_array_equal(ret,[3,4])
+        for gamma,lam in ((-1,1),(1,2)):
+            with self.assertRaises(ValueError):gae([1],[0],[True],gamma,lam)
+        with self.assertRaises(ValueError):gae([3e38,3e38],[0,0],[False,True],1.,1.)
+
+    def test_joint_diagnostics_exclude_inactive_heads_and_preserve_gradient_rng(self):
+        m=ActorCritic(D4_STATE);b=self.batch(m);x=torch.tensor(b['x']);g=torch.tensor(b['g'])
+        x[0,0]=0;x[1,0]=1 # background-only, then ROI-only
+        out=m.evaluate(x,g);rng=torch.get_rng_state().clone()
+        d=joint_diagnostics(out,np.arange(len(x),dtype=np.float32))
+        self.assertEqual(d['both_active_frames'],14);self.assertEqual(d['single_active_frames'],2)
+        self.assertEqual(np.sum(d['sampled_counts']),14)
+        self.assertAlmostEqual(np.sum(d['mean_probabilities']),1.,places=6)
+        self.assertFalse(d['adaptation_proven']);json.dumps(d,allow_nan=False)
+        self.assertTrue(torch.equal(rng,torch.get_rng_state()))
+        out['log_prob'].sum().backward();self.assertGreater(m.actor.weight.grad.abs().sum(),0)
+        none=joint_diagnostics(m.evaluate(x[:1],g[:1],deterministic=True))
+        self.assertIsNone(none['sampled_counts'])
+        with self.assertRaises(ValueError):joint_diagnostics(out,np.zeros(3))
+
+    def test_full_return_d4_optimizer_uses_saved_target_and_joint_action(self):
+        m=ActorCritic(D4_STATE);b=self.batch(m);cfg=PPOConfig(gae_lambda=1.)
+        before=model_hash(m)
+        with tempfile.TemporaryDirectory() as tmp:
+            stats=PPO(m,cfg).update(b,Path(tmp)/'signals.npz')
+            with np.load(Path(tmp)/'signals.npz',allow_pickle=False) as z:
+                a,target=gae(b['reward'],b['value'],b['done'],1.,1.)
+                np.testing.assert_array_equal(z['returns'],target)
+                np.testing.assert_array_equal(z['advantage_raw'],a)
+                np.testing.assert_allclose(z['advantage_normalized'].std(),1.,atol=1e-6)
+                np.testing.assert_array_equal(z['old_value'],b['value'])
+                self.assertEqual(z['advantage_gae095'].shape,(16,))
+            credit=stats['learning_diagnostics']['credit_assignment']
+            self.assertEqual(credit['selected'],'full_clip_return');self.assertEqual(credit['complete_clips'],2)
+            self.assertEqual(stats['learning_diagnostics']['joint_behavior_before_update']['both_active_frames'],16)
+            self.assertTrue(residual_mechanics_ok(m,stats));self.assertNotEqual(before,model_hash(m))
+
+    def test_cli_binds_d4_full_credit_and_explicit_legacy_control(self):
+        from unittest.mock import patch
+        from vvcrl.__main__ import main
+        with tempfile.TemporaryDirectory() as tmp:
+            tools=Path(tmp)/'tools.json';tools.write_text('{}')
+            for extra,wanted in (([],1.),(['--gae-lambda','.95'],.95)):
+                args=['vvcrl','preflight','--output',str(Path(tmp)/'out'),'--toolchain',str(tools),
+                      '--state-version',D4_STATE,'--reward-version',ONLINE_REWARD,*extra]
+                with patch('sys.argv',args),patch('vvcrl.preflight.full_preflight') as run:
+                    main()
+                    self.assertEqual(run.call_args.kwargs['ppo_config'].gae_lambda,wanted)

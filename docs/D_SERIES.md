@@ -4,7 +4,7 @@
 
 D35 controls established useful clip-level alternatives in the existing action space. The matched-prefix diagnostic completed 4 baseline replays and 24 single-step interventions on 8 Train states: all prefixes matched and all alternatives remained inside the original cap. Only one state had a tested utility improvement above the declared 0.001 threshold. Immediate quality could improve while final quality deteriorated, and matched-IoU utility could improve while teacher F1 deteriorated. This does not establish a unique implementation bug, a need to replace PPO, or an optimal action duration.
 
-D4 isolates one supported intervention: remove the known budget potential from the neural critic's learning burden. The value decomposition is retained. This revision separately replaces D4 checkpoint selection with real-label Validation RD metrics; native code, Actor, action, state information, PPO and reward formula are unchanged. No Test outcome was used to tune it.
+D4 isolates one supported intervention: remove the known budget potential from the neural critic's learning burden. The value decomposition is retained. The earlier RD-selection revision changed checkpoint selection only. The current full-clip credit revision below changes the selected return estimator; native code, Actor architecture, action space, state information and reward formula remain unchanged. No Test outcome was used to tune it.
 
 | Variant | State/model convention | Reward |
 |---|---|---|
@@ -48,7 +48,7 @@ CPU replay used the first two verified historical D3 Train clips (512 transition
 
 Actor log-probability difference before the update was exactly zero; maximum offset error against recorded native budget context was 5.73e-7; GAE equivalence error was 1.61e-6. A smaller neural target is useful conditioning evidence, not evidence of higher F1, mAP, lower BD-rate, or generalization. D4 could still learn a nearly constant argmax or fail to improve detection.
 
-PPO saves budget offset, residual value/returns and Monte Carlo advantage alongside original GAE, reward, TD error and factor probabilities. Every D4 episode also checks its pre-action offset against the actual causal reward-budget context and records the maximum identity error. Monte Carlo is diagnostic only and never replaces the configured GAE. Both shaped and residual explained variance are reported so known-offset prediction is not mistaken for learned task value. Module gradients and state-dependence probes remain available; perturbation probes are not native causal evidence.
+PPO saves budget offset, residual value/returns and Monte Carlo advantage alongside original GAE, reward, TD error and factor probabilities. Every D4 episode also checks its pre-action offset against the actual causal reward-budget context and records the maximum identity error. Both estimator references are retained; the bound configuration determines which advantage and return actually train PPO (current full-clip mode: lambda=1). Both shaped and residual explained variance are reported so known-offset prediction is not mistaken for learned task value. Module gradients and state-dependence probes remain available; perturbation probes are not native causal evidence.
 
 ### Checkpoint selection (D4, current source only)
 
@@ -70,6 +70,57 @@ This aligns model selection with the research endpoint; it does not prove D4 lea
 
 All launchers pin the same immutable functional commit and fingerprint and default to D4. Changing VARIANT to D3 provides a same-source control but requires its own fresh preflight and training. Do not reuse D3/B/Combined checkpoints or gates for D4: weight shapes are not a semantic compatibility test. Start from fresh weights. The earlier D4 teacher-F1 preflight is also incompatible with this source-bound RD selection revision; rerun Stage 1. An interrupted same-version, same-source stage can resume from its non-FAILED SAFE via PARTIAL_STAGE_INPUT. Completed exports are preserved on failure.
 
-The mini protocol stays 16 Train / 4 Validation, 256 frames, all 5 Train rates 50/80/120/160/200, seed 20261120 and the mixed 40-update/80-clip schedule. D4 Validation now uses four videos at all five rates every five updates; 20 anchor/policy pairs rather than 12. A preflight checks all four GT coverages and the real AP path on one Val clip, not the full expensive RD matrix. It cannot establish a useful learned policy. No Test selection. PPO LR 1e-4, 3 epochs, gamma 1, lambda .95, auxiliary .1 and entropy .01 remain unchanged. Partition/MTS, action duration and joint-action redesign are deferred until there is evidence for a separate intervention.
+The mini protocol stays 16 Train / 4 Validation, 256 frames, all 5 Train rates 50/80/120/160/200, seed 20261120 and the mixed 40-update/80-clip schedule. D4 Validation now uses four videos at all five rates every five updates; 20 anchor/policy pairs rather than 12. A preflight checks all four GT coverages and the real AP path on one Val clip, not the full expensive RD matrix. It cannot establish a useful learned policy. No Test selection. PPO LR 1e-4, 3 epochs, gamma 1, auxiliary .1 and entropy .01 remain unchanged; the current full-clip launchers explicitly select lambda 1.0, while CREDIT_MODE=gae095 retains lambda .95 as a fresh controlled experiment. Partition/MTS, action duration and joint-action redesign are deferred until there is evidence for a separate intervention.
 
 SAFE can be an intact ZIP or Kaggle-expanded payload.bin plus its hash sidecar; toolchain can be ZIP or an expanded manifest/executable directory. Do not expand the inner payload.bin. The legacy B/V2 launchers remain pinned historical controls. The all-in-one D-series notebook is retained, defaulting to D4 with training disabled.
+
+
+## Current full-clip Actor credit revision
+
+Evidence: the completed D4 Actor-credit report verified 40 native cases (36 paired
+interventions at two Train states, 50 kbps). Actions were not erased by QPA.
+Fourteen branches improved AP50:95, ten were Pareto improvements against PPO10;
+eight of fourteen positive proxy-return branches had nonpositive frozen-value GAE
+changes. Deterministic continuation is not stochastic Q(s,a), and the tested best
+pair was the SAME (+1,+1) in both states/durations. This does not prove distinct
+state-optimal actions, a unique cause, or successful spatial allocation.
+
+On all 10 historical sampled Train updates, lambda=.95/full-return advantage sign
+disagreement ranged from 7.23% to 43.36%; full-return standard deviations were
+higher. These are estimator-sensitivity observations, not causal action values.
+Full-clip return is therefore an evidence-motivated controlled change, not a
+promise of better AP or a general claim that lambda=1 dominates GAE.
+
+Current launchers explicitly use gamma=1, lambda=1. Both Actor advantage and
+Critic target use the SAME complete sampled clip return. Reward-to-go is computed
+directly in float64, then returned as checked float32 tensors, avoiding
+cancellation through intermediate shaped Critic values. Only V(s_t) is subtracted
+for the Actor baseline; the Critic's known budget offset is subtracted once from
+its neural target. Done masks isolate clips and terminal excess cost. Reward,
+cap, state, architecture, argmax and native code are unchanged. PPOConfig's
+historical default remains .95; CLI D4 defaults to 1, launchers pass it explicitly,
+and binding/checkpoint/gate checks include the chosen value.
+
+Read-only diagnostics now include the 25 joint ROI/background pairs (only when
+both regions are present), pair probabilities, executed/argmax counts, observed
+conditional advantages, and agreement with a constant pair derived from mean
+probabilities. These are not causal rankings, a diversity loss, or proof of
+adaptation. Signals retain old values, normalized advantages, both estimator
+references and the selected estimator. A single-region picture has only one
+active decision. Auxiliary remains Critic-only; joint PPO log probability remains
+the sum of the active factor log probabilities.
+
+Review short-run variance, sampled versus deterministic behavior and GT RD
+validation before extending 10 updates to 40. To claim useful content adaptation,
+compare the frozen policy against QPA AND fixed ROI/background controls selected
+on Train and frozen before held-out evaluation. Do not pick a best control on
+Validation and claim generalization. A diverse histogram is not success, a
+constant action is not automatically wrong, and changing ROI/background equally
+is not proof of semantic redistribution. All-five-rate Validation selection and
+original cap remain unchanged; Test never selects a model.
+
+Compatibility: fresh preflight and fresh weights for this revision; exact-source,
+config and environment checks reject old D4 training resume. Same-revision SAFE
+resume restores optimizer/RNG/prices and is checked against uninterrupted CPU
+orchestration. Historical launchers remain pinned. No new full-data/GPU training
+or improved VVC performance has been established by this source revision.
