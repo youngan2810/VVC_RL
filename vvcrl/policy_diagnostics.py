@@ -2,7 +2,7 @@
 from itertools import combinations
 import numpy as np
 import torch
-from .config import D3_STATE,uses_feedback,REGION_STATES
+from .config import ONLINE_STATES,uses_feedback,REGION_STATES
 from .model import model_hash
 
 HEADS=('roi','background')
@@ -73,7 +73,7 @@ def validation_policy_diagnostics(model,batch,rows,reward_config):
         # original step and target. Other historical features held fixed.
         gg=g.clone();gg[:,3]=g[perm,3];step=g[:,1]*n
         gg[:,4]=((1-gg[:,3])*n/(n-step).clamp_min(1)).clamp(-4,4)/4
-        if model.state_version==D3_STATE:
+        if model.state_version in ONLINE_STATES:
             tol=1+reward_config.rate_tolerance
             gg[:,18]=gg[:,3]-tol*step/n
             gg[:,19]=(tol*(step+1)-gg[:,3]*n).clamp(-4,4)/4

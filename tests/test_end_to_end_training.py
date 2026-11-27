@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from vvcrl import train
 from vvcrl.artifacts import import_run
-from vvcrl.config import Profile,PPOConfig,RewardConfig,atomic_json,digest,state_shape,LEGACY_STATE,FEEDBACK_STATE,D1_STATE,D1_ISOLATED_STATE,D2_STATE,D2_NEUTRAL_STATE,D3_STATE,COMBINED_REWARD,ONLINE_REWARD
+from vvcrl.config import Profile,PPOConfig,RewardConfig,atomic_json,digest,state_shape,LEGACY_STATE,FEEDBACK_STATE,D1_STATE,D1_ISOLATED_STATE,D2_STATE,D2_NEUTRAL_STATE,D3_STATE,D4_STATE,COMBINED_REWARD,ONLINE_REWARD
 from vvcrl.episode import verified_result
 from vvcrl.collect import load_batches
 from vvcrl.model import ActorCritic,model_hash
@@ -61,7 +61,7 @@ class EndToEndTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Duplicate rollout'):load_batches([{'folder':'same'},{'folder':'same'}])
     def test_training_export_import_resume_exact(self):
         torch.set_num_threads(1)
-        variants=[(LEGACY_STATE,'task-budget-v2'),(FEEDBACK_STATE,'task-budget-v2'),(LEGACY_STATE,'task-budget-v3-progressive'),(LEGACY_STATE,'task-budget-v2-soft-iou'),(FEEDBACK_STATE,'task-budget-v3-progressive-soft-iou'),(D1_STATE,COMBINED_REWARD),(D1_ISOLATED_STATE,COMBINED_REWARD),(D2_STATE,COMBINED_REWARD),(D2_NEUTRAL_STATE,COMBINED_REWARD),(D3_STATE,ONLINE_REWARD)]
+        variants=[(LEGACY_STATE,'task-budget-v2'),(FEEDBACK_STATE,'task-budget-v2'),(LEGACY_STATE,'task-budget-v3-progressive'),(LEGACY_STATE,'task-budget-v2-soft-iou'),(FEEDBACK_STATE,'task-budget-v3-progressive-soft-iou'),(D1_STATE,COMBINED_REWARD),(D1_ISOLATED_STATE,COMBINED_REWARD),(D2_STATE,COMBINED_REWARD),(D2_NEUTRAL_STATE,COMBINED_REWARD),(D3_STATE,ONLINE_REWARD),(D4_STATE,ONLINE_REWARD)]
         for version,reward_version in variants:
             with self.subTest(version=version,reward=reward_version),tempfile.TemporaryDirectory() as tmp:
                 root=Path(tmp);cfg=RewardConfig(reward_version);bind={'state_version':version,'reward':asdict(cfg),'ppo':asdict(PPOConfig())}

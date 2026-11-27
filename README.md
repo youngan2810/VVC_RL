@@ -2,7 +2,15 @@
 
 This is a new research implementation, not a resume of the earlier Gaussian/PPO or D3QN experiments. QPA and rate control remain active. The learned policy selects an integer residual per CTU to preserve object-detection information under a bitrate budget. Only QP control is implemented; Partition, MTS and other machine tasks are future work.
 
-## Research design
+## Current D4 experiment
+
+On `research/d-series-adaptive-policy`, use [D-Series Preflight](notebooks/VVC_RL_D_Series_01_Preflight_Kaggle.ipynb), then [Train 10 updates](notebooks/VVC_RL_D_Series_02_Train10_Kaggle.ipynb). Review the first 10 updates before using [Resume to 40](notebooks/VVC_RL_D_Series_03_Resume30_Kaggle.ipynb). These launchers default to **D4**, pin an immutable functional commit and fingerprint, and require a fresh same-source gate. Historical B/V2 launchers below remain pinned controls.
+
+D4 preserves D3's 11 spatial / 20 global state, two ROI/background categoricals, native encoder, reward, auxiliary and 2% cap. The critic adds the known causal budget-refund potential analytically; the neural value target excludes it. Actor probabilities are not forced to change. See [D-series method, evidence and limits](docs/D_SERIES.md). D3 checkpoints cannot resume D4 even though weight shapes coincide. Start fresh; unchanged legacy methods remain available for controlled comparisons.
+
+Stage 1 needs the locked BDD100K MOV dataset. Stage 2 additionally needs the **new D4** preflight SAFE and its exact toolchain bundle. Stage 3 also needs the completed D4 Stage 2 SAFE. Kaggle-expanded outer SAFE payloads and toolchain directories are supported. Do not manually unpack `VVC_RL_payload.bin`. CPU tests/replay do not prove detection improvement; native two-GPU preflight and matched validation remain mandatory.
+
+## Historical B/V2 research design
 
 - PPO-Clip + GAE; two learned categorical factors per coded picture (source-ROI / background), each in `{-2,-1,0,1,2}`, mapped to the existing 12 integer CTU residuals. QPA still supplies the detailed base QPs. Neither region is forced to receive a particular sign or nonzero action.
 - Native 480×320, 30 fps, CTU128, QPA enabled, medium preset, GOP32, one-pass RC, serial coded pictures. Two independent GPU detector/encoder collectors; PPO itself runs on CPU.

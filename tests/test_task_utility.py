@@ -37,3 +37,11 @@ class UtilityTests(unittest.TestCase):
         report=validation_summary([dict(video='v',result=result)],[('v',120)],cfg)
         self.assertTrue(report['eligible_checkpoint']);self.assertAlmostEqual(report['macro_delta_utility'],-.1)
         with self.assertRaises(ValueError):validation_summary([dict(video='v',result=dict(result,utility_version=TASK))],[('v',120)],cfg)
+
+    def test_utility_gain_f1_loss_is_visible_but_never_primary_success(self):
+        cfg=RewardConfig('task-budget-v4-online-soft-iou')
+        result=dict(split='val',rate=120,budget=100,anchor_bits=100,bits=100,actual_kbps=120,
+                    task_retention_f1_v2=.69,anchor_quality=.7,task_utility=.61,anchor_task_utility=.6,utility_version=cfg.utility)
+        report=validation_summary([dict(video='v',result=result)],[('v',120)],cfg)
+        self.assertEqual(report['utility_gain_f1_loss_pairs'],1)
+        self.assertFalse(report['eligible_checkpoint']);self.assertTrue(report['eligible_utility_checkpoint'])

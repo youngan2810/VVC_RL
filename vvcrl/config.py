@@ -20,11 +20,17 @@ D1_ISOLATED_STATE='d1-isolated-v1'
 D2_STATE='d2-region-v1'
 D2_NEUTRAL_STATE='d2-region-neutral-v1'
 D3_STATE='d3-online-budget-v1'
-D_STATES=(D1_STATE,D1_ISOLATED_STATE,D2_STATE,D2_NEUTRAL_STATE,D3_STATE)
-REGION_STATES=(D2_STATE,D2_NEUTRAL_STATE,D3_STATE)
+D4_STATE='d4-budget-value-v1'
+ONLINE_STATES=(D3_STATE,D4_STATE)
+D_STATES=(D1_STATE,D1_ISOLATED_STATE,D2_STATE,D2_NEUTRAL_STATE,*ONLINE_STATES)
+REGION_STATES=(D2_STATE,D2_NEUTRAL_STATE,*ONLINE_STATES)
 ISOLATED_STATES=(D1_ISOLATED_STATE,*REGION_STATES)
 STATE_SHAPES={LEGACY_STATE:(8,15),FEEDBACK_STATE:(11,18),
-              **{v:(11,18) for v in D_STATES},D3_STATE:(11,20)}
+              **{v:(11,18) for v in D_STATES},**{v:(11,20) for v in ONLINE_STATES}}
+# D4's analytic value offset is in these scaled reward units. Keep the
+# historical PPOConfig unchanged; reject a different scale rather than silently
+# changing collector/critic conventions.
+BUDGET_VALUE_SCALE=100.
 
 def uses_feedback(version):
     state_shape(version)
@@ -36,10 +42,10 @@ COMBINED_REWARD='task-budget-v3-progressive-soft-iou'
 def validate_experiment(state_version,reward_config):
     state_shape(state_version);reward_config.validate()
     if state_version in D_STATES:
-        expected=ONLINE_REWARD if state_version==D3_STATE else COMBINED_REWARD
+        expected=ONLINE_REWARD if state_version in ONLINE_STATES else COMBINED_REWARD
         if reward_config.version!=expected:raise ValueError('D-series state/reward binding mismatch')
     elif reward_config.version==ONLINE_REWARD:
-        raise ValueError('Online reward requires D3 state for policy experiments')
+        raise ValueError('Online reward requires an online-budget state for policy experiments')
 
 def state_shape(version=LEGACY_STATE):
     if version not in STATE_SHAPES:raise ValueError('Unknown state schema: '+str(version))

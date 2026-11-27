@@ -1,6 +1,6 @@
 import math
 import numpy as np
-from .config import W,H,CTU,NX,NY,FB,LEGACY_STATE,FEEDBACK_STATE,state_shape,uses_feedback,D3_STATE,RewardConfig,ONLINE_REWARD
+from .config import W,H,CTU,NX,NY,FB,LEGACY_STATE,FEEDBACK_STATE,state_shape,uses_feedback,ONLINE_STATES,RewardConfig,ONLINE_REWARD
 from .locked.method import boxes_checked
 from .reward import online_cap
 
@@ -11,9 +11,9 @@ def pool(image):
 class StateBuilder:
     def __init__(self,source,boxes,frames,rate,price,state_version=LEGACY_STATE,reward_config=None):
         self.state_version=state_version;state_shape(state_version)
-        self.reward_config=reward_config or RewardConfig(ONLINE_REWARD if state_version==D3_STATE else 'task-budget-v2')
+        self.reward_config=reward_config or RewardConfig(ONLINE_REWARD if state_version in ONLINE_STATES else 'task-budget-v2')
         self.reward_config.validate()
-        if state_version==D3_STATE and not self.reward_config.online:raise ValueError('D3 requires online budget reward')
+        if state_version in ONLINE_STATES and not self.reward_config.online:raise ValueError('Online state requires online budget reward')
         self.previous_qp=np.zeros((NY,NX),np.float32);self.previous_response=np.zeros_like(self.previous_qp)
         self.previous_roi=np.zeros((NY,NX),bool);self.feedback_global=np.zeros(3,np.float32);self.pending=None
         self.frames,self.rate,self.price=frames,rate,float(price);self.boxes=boxes
@@ -49,7 +49,7 @@ class StateBuilder:
             self.pending=(self.k,p,x[0]>0,qp.copy())
             x=np.concatenate((x,np.stack((self.previous_qp/63,self.previous_response/63,self.previous_roi.astype(np.float32)))),axis=0)
             g=np.concatenate((g,self.feedback_global))
-        if self.state_version==D3_STATE:
+        if self.state_version in ONLINE_STATES:
             cap=online_cap(self.budget,self.k,self.frames,self.reward_config)
             next_cap=online_cap(self.budget,self.k+1,self.frames,self.reward_config)
             pressure=(self.used-cap)/self.budget

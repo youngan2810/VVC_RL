@@ -2,7 +2,7 @@ import hashlib,io,copy
 import torch
 from torch import nn
 from torch.distributions import Categorical
-from .config import NY,NX,N,LEGACY_STATE,state_shape,D_STATES,REGION_STATES,D2_NEUTRAL_STATE
+from .config import NY,NX,N,LEGACY_STATE,state_shape,D_STATES,REGION_STATES,D2_NEUTRAL_STATE,D4_STATE,BUDGET_VALUE_SCALE
 
 class ActorCritic(nn.Module):
     def __init__(self,state_version=LEGACY_STATE):
@@ -74,6 +74,18 @@ class ActorCritic(nn.Module):
         sc,gc=state_shape(self.state_version)
         if x.ndim!=4 or x.shape[1:]!=(sc,NY,NX) or g.shape!=(len(x),gc):raise ValueError('State schema/model shape mismatch')
         return self._features(x,g,self.spatial,self.global_net)
+
+    def value_budget_offset(self,g):
+        """Known pre-action refund potential, in scaled reward units.
+
+        D3 state already contains price/10 (14) and signed current budget
+        pressure (18). Phi_t=-scale*price*max(pressure,0); V_shaped=U-Phi_t.
+        U learns task-to-go plus terminal bitrate cost. No future action,
+        anchor total, or terminal outcome is used. The terminal potential is
+        zero via the existing done mask in GAE, never a next-episode offset.
+        """
+        if self.state_version!=D4_STATE:return g.new_zeros(len(g))
+        return (BUDGET_VALUE_SCALE*10*g[:,14]*g[:,18].clamp_min(0)).detach()
     def evaluate(self,x,g,actions=None,deterministic=False):
         z,pool=self.features(x,g);batch=len(x)
         roi=(x[:,0]>0).reshape(batch,N)
@@ -116,7 +128,9 @@ class ActorCritic(nn.Module):
         if self.state_version in D_STATES:
             z,pool=self._features(x,g,self.critic_spatial,self.critic_global)
         aux=self.auxiliary(torch.cat([z,onehot],1)).squeeze(1)
-        return {'actions':actions,'log_prob':logp,'value':self.critic(pool).squeeze(-1),
+        value_residual=self.critic(pool).squeeze(-1);value_offset=self.value_budget_offset(g)
+        return {'actions':actions,'log_prob':logp,'value':value_residual+value_offset,
+          'value_residual':value_residual,'value_budget_offset':value_offset,
           'entropy_joint':entropy.sum(-1),'entropy_mean':entropy.sum(-1)/active.sum(-1).clamp_min(1),
           'logits':logits,'factor_logits':factor_logits,'base_factor_logits':base_logits,'residual_factor_logits':residual_logits,'factor_actions':factors,'active_factors':active,'aux_logits':aux}
     def act(self,x,g,deterministic=False):

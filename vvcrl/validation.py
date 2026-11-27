@@ -29,6 +29,7 @@ def validation_summary(rows,expected_pairs,reward_config=RewardConfig()):
         'macro_delta_utility':float(np.mean([p['delta_utility'] for p in detail])) if detail else None,
         'selection_metric':'legacy teacher F1 retention (unchanged; not GT-mAP)',
         'quality_regressions':sum(p['delta_quality']<0 for p in detail),
+        'utility_gain_f1_loss_pairs':sum(p['delta_utility']>1e-12 and p['delta_quality']< -1e-12 for p in detail),
         'eligible_checkpoint':complete and feasible and gain is not None and gain>0,
         'eligible_utility_checkpoint':complete and feasible and bool(detail) and float(np.mean([p['delta_utility'] for p in detail]))>0,
         'interpretation':'A checkpoint needs complete validation, positive macro F1 gain and every clip within the shared bitrate cap. This is not a Test or ground-truth mAP claim.'}
@@ -40,6 +41,7 @@ def rollout_summary(rows):
         'mean_bitrate_component':float(np.mean([r['clip_objective']['bit_component'] for r in results])),
         'mean_raw_return':float(np.mean([r['raw_return'] for r in results])),
         'within_cap_fraction':float(np.mean([r['clip_objective']['within_cap'] for r in results])),
+        'utility_gain_f1_loss_clips':sum(r['clip_objective']['task_component']>1e-12 and r['task_retention_f1_v2']<r['anchor_quality']-1e-12 for r in results),
         'mean_entropy':float(np.mean([r['mean_action_entropy'] for r in results if r['mean_action_entropy'] is not None])) if any(r['mean_action_entropy'] is not None for r in results) else None,
         'requested_action_distribution':{str(d):float(np.mean([r['requested_action_distribution'].get(str(d),0) for r in results])) for d in DELTAS},
         'effective_qg_candidate_counts':{str(d):sum(r['action_audit']['effective_delta_histogram'].get(str(d),0) for r in results) for d in DELTAS},

@@ -2,7 +2,7 @@ import json,tempfile,unittest,zipfile,hashlib
 from pathlib import Path
 import numpy as np
 import torch
-from vvcrl.config import D2_STATE,D3_STATE,RewardConfig,COMBINED_REWARD,ONLINE_REWARD
+from vvcrl.config import D2_STATE,D3_STATE,D4_STATE,ONLINE_STATES,RewardConfig,COMBINED_REWARD,ONLINE_REWARD
 from vvcrl.model import ActorCritic,model_hash
 from vvcrl.ppo import PPO,residual_mechanics_ok
 from vvcrl.policy_diagnostics import validation_policy_diagnostics
@@ -13,7 +13,7 @@ class DiagnosticsTests(unittest.TestCase):
     def setUp(self):torch.set_num_threads(1);torch.manual_seed(43)
     def batch(self,m):
         n=16;x=torch.rand(n,11,3,4);x[:,0]=0;x[:,0,0,0]=.5;x[:,7]=1
-        g=torch.zeros(n,20 if m.state_version==D3_STATE else 18);g[:,1]=torch.arange(n)%8/8;g[:,3]=g[:,1]*.8
+        g=torch.zeros(n,20 if m.state_version in ONLINE_STATES else 18);g[:,1]=torch.arange(n)%8/8;g[:,3]=g[:,1]*.8
         with torch.no_grad():o=m.evaluate(x,g)
         b={k:o[k].numpy() for k in ('actions','log_prob','value')}
         b.update(x=x.numpy(),g=g.numpy(),reward=np.linspace(-1,1,n,dtype=np.float32),done=np.array(([False]*7+[True])*2),aux_target=np.zeros((n,3,4),np.float32),aux_weight=np.ones((n,3,4),np.float32))
@@ -47,6 +47,13 @@ class DiagnosticsTests(unittest.TestCase):
                 z.writestr('a',b'bad');z.writestr('EXPORT_MANIFEST.json',json.dumps({'schema':'vvc-rl-safe/1','files':{'a':'0'*64}}))
             with self.assertRaises(ValueError):import_run(corrupt,root/'failed')
             self.assertFalse((root/'failed').exists())
+
+    def test_d4_diagnostics_do_not_change_policy_or_rng(self):
+        m=ActorCritic(D4_STATE);b=self.batch(m);before=model_hash(m);rng=torch.get_rng_state().clone()
+        rows=[dict(video='v',result=dict(split='val',rate=r,identity={'profile':{'frames':8}},coding_order=list(range(8)))) for r in (50,200)]
+        result=validation_policy_diagnostics(m,b,rows,RewardConfig(ONLINE_REWARD))
+        self.assertEqual(before,model_hash(m));self.assertTrue(torch.equal(rng,torch.get_rng_state()))
+        self.assertEqual(len(result['episodes']),2);json.dumps(result,allow_nan=False)
     def test_rate_fixed_selection(self):
         def row(gain,ok):
             return dict(rate=50,task_retention_f1_v2=.6+gain,anchor_quality=.6,anchor_bits=100,clip_objective={'within_cap':ok,'budget_cap_bits':102})

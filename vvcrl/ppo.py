@@ -2,7 +2,7 @@ from dataclasses import asdict
 from pathlib import Path
 import numpy as np
 import torch
-from .config import PPOConfig,D_STATES,ISOLATED_STATES,REGION_STATES
+from .config import PPOConfig,D_STATES,ISOLATED_STATES,REGION_STATES,D4_STATE,BUDGET_VALUE_SCALE
 
 def gae(rewards,values,terminated,gamma=1.,lam=.95,last_value=0.):
     r=np.asarray(rewards,np.float32);v=np.asarray(values,np.float32);d=np.asarray(terminated,bool)
@@ -77,6 +77,7 @@ def residual_mechanics_ok(model,stats):
 class PPO:
     def __init__(self,model,config=PPOConfig()):
         config.validate();self.model,self.config=model,config
+        if model.state_version==D4_STATE and config.reward_scale!=BUDGET_VALUE_SCALE:raise ValueError('D4 analytic value requires reward_scale=100')
         self.isolated=model.state_version in ISOLATED_STATES
         if model.state_version in D_STATES:
             ap,cp=model.actor_parameters(),model.critic_parameters()
@@ -127,6 +128,23 @@ class PPO:
             factor_probabilities=replay['factor_logits'].softmax(-1).cpu().numpy()
             factor_actions=replay['factor_actions'].cpu().numpy()
             factor_active=replay['active_factors'].cpu().numpy()
+            value_offset=replay['value_budget_offset'].cpu().numpy()
+            value_residual=replay['value_residual'].cpu().numpy()
+        extra_signals={}
+        if m.state_version==D4_STATE:
+            # Diagnostics only: never substitute MC for the selected GAE.
+            mc_advantage,_=gae(rewards,old_values,done,c.gamma,1.)
+            residual_returns=raw_returns-value_offset
+            residual_variance=float(np.var(residual_returns))
+            learning['value_decomposition']={
+                'convention':'V_shaped=V_residual+scale*price*positive_pre_action_pressure',
+                'budget_offset_mean':float(value_offset.mean()),'budget_offset_max':float(value_offset.max()),
+                'residual_return_std':float(residual_returns.std()),
+                'residual_explained_variance':float(1-np.var(residual_returns-value_residual)/residual_variance) if residual_variance>1e-12 else None,
+                'gae_mc_sign_disagreement':float(np.mean(np.sign(raw_advantage)!=np.sign(mc_advantage))),
+                'interpretation':'Estimator sensitivity only; MC is not a counterfactual Q-value or a learning-quality claim.'}
+            extra_signals=dict(value_budget_offset=value_offset,value_residual=value_residual,
+                returns_residual=residual_returns,advantage_monte_carlo=mc_advantage)
         if not np.isfinite([replay_error,value_error]).all() or replay_error>2e-5 or value_error>2e-5:raise ValueError('Collector policy/value differs from optimizer before update')
         before_actor=m.actor.weight.detach().clone();before_critic=m.critic[-1].weight.detach().clone();metrics=[];stopped=False
         groups=diagnostic_groups(m) if m.state_version in D_STATES else {}
@@ -140,7 +158,12 @@ class PPO:
                 if not torch.isfinite(kl):raise ValueError('Nonfinite PPO KL')
                 if float(kl.detach())>c.target_kl:stopped=True;break
                 policy=-torch.minimum(ratio*adv[idx],ratio.clamp(1-c.clip,1+c.clip)*adv[idx]).mean()
-                value=.5*(out['value']-ret[idx]).square().mean()
+                if m.state_version==D4_STATE:
+                    # Same value error, but make the neural target explicitly
+                    # exclude the known refund. Actor still uses shaped GAE.
+                    target_residual=ret[idx]-out['value_budget_offset']
+                    value=.5*(out['value_residual']-target_residual).square().mean()
+                else:value=.5*(out['value']-ret[idx]).square().mean()
                 per=nn_bce(out['aux_logits'],target[idx]);aux=(per*weight[idx]).sum()/weight[idx].sum().clamp_min(1)
                 entropy=out['entropy_mean'].mean()
                 loss=policy+c.value_coef*value-c.entropy_coef*entropy+c.auxiliary_coef*aux
@@ -187,7 +210,7 @@ class PPO:
             np.savez_compressed(path,advantage_raw=raw_advantage,returns=raw_returns,
                 td_error=td_error,reward=rewards,done=done,
                 factor_probabilities=factor_probabilities,factor_actions=factor_actions,
-                factor_active=factor_active)
+                factor_active=factor_active,**extra_signals)
             stats['learning_diagnostics']['transition_signals_file']=path.name
         return stats
 

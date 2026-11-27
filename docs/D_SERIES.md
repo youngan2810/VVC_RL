@@ -1,37 +1,65 @@
-# D-series controlled research implementation
+# D-series controlled QP research
 
-Base: Combined d135a8a4c57b0d96c356f36647109125c08b1932. Fixed policy is observed, not a proven architectural failure. Native counterfactual is incomplete. No useful-learning claim or Test10 tuning.
+## Current experiment: D4 budget-value decomposition
 
-| Variant | --state-version | --reward-version |
+D35 controls established useful clip-level alternatives in the existing action space. The matched-prefix diagnostic completed 4 baseline replays and 24 single-step interventions on 8 Train states: all prefixes matched and all alternatives remained inside the original cap. Only one state had a tested utility improvement above the declared 0.001 threshold. Immediate quality could improve while final quality deteriorated, and matched-IoU utility could improve while teacher F1 deteriorated. This does not establish a unique implementation bug, a need to replace PPO, or an optimal action duration.
+
+D4 isolates one supported intervention: remove the known budget potential from the neural critic's learning burden. No native, Actor, action, state information, reward formula, checkpoint selection metric or bitrate-cap change is bundled into this experiment. No Test outcome was used to tune it.
+
+| Variant | State/model convention | Reward |
 |---|---|---|
 | D0 | encoder-feedback-v1 | task-budget-v3-progressive-soft-iou |
 | D1 | d1-decoupled-v1 | task-budget-v3-progressive-soft-iou |
 | D1i | d1-isolated-v1 | task-budget-v3-progressive-soft-iou |
 | D2 | d2-region-v1 | task-budget-v3-progressive-soft-iou |
-| D2 neutral initialization control | d2-region-neutral-v1 | task-budget-v3-progressive-soft-iou |
+| D2-neutral | d2-region-neutral-v1 | task-budget-v3-progressive-soft-iou |
 | D3 | d3-online-budget-v1 | task-budget-v4-online-soft-iou |
+| **D4** | **d4-budget-value-v1** | **task-budget-v4-online-soft-iou (unchanged)** |
 
-D1 deep-copies the original CNN/MLP for value and auxiliary. Same initialization and joint gradient clipping; D1i isolates clipping budgets, using two disjoint Adam parameter groups (per-parameter moments, not two independent optimizer objects). D2 adds a zero-output-initialized nonlinear residual to the original regional logits; the context includes both area-weighted regional embeddings, raw features, global features, area fractions and presence masks. D2-neutral removes the original no-op bias only. D3 adds two causal budget features (signed pressure and next-step headroom) and target-linear intermediate cap with anchor-dependent terminal correction. No future anchor information enters policy. Terminal correction preserves undiscounted objective, but may affect GAE and remains partially observed. Existing reward/architecture identifiers are preserved. New anchor result JSON has explicit coding_order; D3 requires it. Historical C2 anchor fallback remains for compatibility only.
+D1 separates Actor and Critic/Aux representations; D1i and later variants also use independent clipping budgets on disjoint Adam parameter groups. D2 adds nonlinear cross-region residual logits; D3 adds causal budget pressure/headroom and online target-linear intermediate caps. All previous identifiers and numerical behavior are retained.
 
-Use the same locked dataset, profile, seed, mixed schedule, rates, PPO, 40 updates, validation cadence 5. First run full real-data preflight **for each exact variant/source/toolchain**; no resume from D0/B20. D0 and D1 are the first comparison, then D1i, D2, D3 if warranted. Primary checkpoint selection remains feasible positive macro teacher F1. Secondary best_utility.pt is diagnostic, not a post-hoc alternative primary. Compare against VVC+QPA, B20, C15 and fixed (0,+1), (-1,+1), (-2,+1) on identical native toolchain. Multiple seeds and independent GT AP/RD evaluation required before claims. No Test10 tuning.
+## Value convention and why it is valid
 
-Example (set paths to actual Kaggle inputs/toolchain; use an immutable commit checkout):
-```bash
-python -m vvcrl preflight --output /kaggle/working/d1_gate --toolchain /kaggle/working/toolchain.json --input /kaggle/input --state-version d1-decoupled-v1 --reward-version task-budget-v3-progressive-soft-iou --rate-tolerance .02 --frames 256 --seed 20261120 --train-schedule mixed
-python -m vvcrl train-mini --output /kaggle/working/d1_run --preflight /kaggle/working/d1_gate --toolchain /kaggle/working/toolchain.json --input /kaggle/input --state-version d1-decoupled-v1 --reward-version task-budget-v3-progressive-soft-iou --rate-tolerance .02 --frames 256 --seed 20261120 --train-schedule mixed --updates 40 --val-every 5 --start-mini-training
+Before coding step t, let E_t=max(0, used_bits_t-online_cap_t). During a clip the price is fixed. Let scale=100 and Phi_t=-scale*price*E_t/target_bits; Phi_T=0 at termination. The existing progressive reward equals task reward plus terminal excess cost plus Phi_(t+1)-Phi_t, including the final anchor-dependent cap correction. Gamma remains 1.
+
+The D4 critic outputs:
+
 ```
-Check actual historical rate_tolerance from TRAIN_BINDING.json and use it consistently; do not assume defaults. D4 counterfactual advantage, expanded action range, and native modifications are intentionally deferred. CPU tests and native fixture smoke are mechanics only; real GPU preflight and matched training are required.
+V_shaped(s_t) = V_residual(s_t) - Phi_t
+               = V_residual(s_t) + 100 * price * positive_budget_pressure_t
+```
 
-## Verification and training entrypoint
+State indices 14 and 18 already provide price/10 and signed pre-action pressure. D4 uses those existing causal features; no future anchor total, current reconstruction, action or final clip outcome enters the offset. The offset has no parameters and receives no gradient. D3/D4 have identical state shapes, weight initialization, RNG and Actor logits at the same seed; the value convention alone changes.
 
-D-series validation now includes per-episode deterministic feature sensitivity, residual/base centered logit contributions, logit margin, and observed same-video/POC cross-rate comparisons. Probes are model sensitivity, not causal codec evidence. The budget probe recomputes derived features but holds other history fixed. PPO reports module-specific policy, weighted entropy and total preclip gradient norms and parameter changes. Preflight checks active residual heads. Online reward phase statistics are saved per temporal layer. The compact diagnostic mode (`--diagnostic-mode compact` with `diagnose`) runs PPO and three prespecified strong fixed controls on all 12 development video/rate points (48 policy/fixed encodes plus anchors); no-op is inferred from the matched anchor. Rate-specific fixed selection is development-only. SAFE import is streamed and staged; export cadence remains unchanged for safe recovery. Real GPU preflight remains mandatory.
+GAE and PPO replay use the full shaped value, exactly as the collector does. The critic MSE is written against returns_shaped-offset. Terminal/done masks suppress the next value and offset, including between concatenated clips. For a matching residual value, GAE on shaped rewards is equivalent to GAE on terminalized rewards for both supported lambda values, up to float32 error. This is a reparameterization, not a claim that lambda=1, a different reward, or a different optimal policy has been proven better. The reward scale is explicitly locked to 100 for D4 at binding, collection and optimizer entry.
 
-Kaggle notebook: [D-Series Training](../notebooks/VVC_RL_D_Series_Training_Kaggle.ipynb). It pins functional commit `c4bccd19f9d48ee2a8269b94d109d441044e4ff3`, defaults to D1 with preflight only, then 10 updates after explicit enablement. The notebook-only commit does not alter the functional source fingerprint. Use two T4 GPUs. No historical checkpoint reuse.
+Theory: [GAE](https://arxiv.org/abs/1506.02438), [potential shaping and value initialization](https://arxiv.org/abs/1106.5267). These support the estimator/value-convention reasoning, not any VVC performance guarantee.
 
-## Three-session Kaggle workflow
+## Evidence and limits
 
-1. [VVC_RL_D_Series_01_Preflight_Kaggle.ipynb](../notebooks/VVC_RL_D_Series_01_Preflight_Kaggle.ipynb)
-2. [VVC_RL_D_Series_02_Train10_Kaggle.ipynb](../notebooks/VVC_RL_D_Series_02_Train10_Kaggle.ipynb)
-3. [VVC_RL_D_Series_03_Resume30_Kaggle.ipynb](../notebooks/VVC_RL_D_Series_03_Resume30_Kaggle.ipynb)
+CPU replay used the first two verified historical D3 Train clips (512 transitions), with identical recorded Actor actions and probabilities. Values were reevaluated under each convention, followed by one optimizer update (24 steps) per model. This is a frozen-trajectory mechanism probe, not fresh D4 native training or validation.
 
-Stage 1 exports a verified gate and exact native binary bundle. Stage 2 imports both and trains to update 10. Stage 3 imports both plus Stage 2 SAFE and resumes to update 40 (30 additional updates). Default D3; keep all settings identical. This is the integrated experiment, not separate D1/D2 ablations. If a stage hits the session limit, resume its latest non-FAILED SAFE in a fresh session using PARTIAL_STAGE_INPUT. No checkpoint conversion or gate bypass. The original all-in-one notebook is retained.
+| Probe | D3 | D4 |
+|---|---:|---:|
+| Neural value-target standard deviation | 1.737173 | 0.209521 |
+| Initial neural value RMSE | 1.758101 | 0.222405 |
+| Mean value loss in this update | 1.517920 | 0.022457 |
+| Actor updated / Critic updated | yes / yes | yes / yes |
+
+Actor log-probability difference before the update was exactly zero; maximum offset error against recorded native budget context was 5.73e-7; GAE equivalence error was 1.61e-6. A smaller neural target is useful conditioning evidence, not evidence of higher F1, mAP, lower BD-rate, or generalization. D4 could still learn a nearly constant argmax or fail to improve detection.
+
+PPO saves budget offset, residual value/returns and Monte Carlo advantage alongside original GAE, reward, TD error and factor probabilities. Every D4 episode also checks its pre-action offset against the actual causal reward-budget context and records the maximum identity error. Monte Carlo is diagnostic only and never replaces the configured GAE. Both shaped and residual explained variance are reported so known-offset prediction is not mistaken for learned task value. Module gradients and state-dependence probes remain available; perturbation probes are not native causal evidence.
+
+Validation additionally counts utility-gain/F1-loss pairs. Primary best_validation.pt still requires complete validation, positive macro teacher F1 and every pair inside cap=(1+tolerance)*min(target_bits,QPA_bits), with tolerance 0.02. best_utility.pt is secondary diagnostic evidence. Teacher retention F1/IoU is not ground-truth AP. Independent GT mAP/BD-rate evaluation is still required after training; no success claim follows from PPO mechanics or utility alone.
+
+## Kaggle workflow and compatibility
+
+1. [Stage 1: full preflight](../notebooks/VVC_RL_D_Series_01_Preflight_Kaggle.ipynb). Input: locked BDD100K MOV videos. Exports a new source-bound gate and exact native toolchain bundle.
+2. [Stage 2: fresh 10 updates](../notebooks/VVC_RL_D_Series_02_Train10_Kaggle.ipynb). Inputs: MOV + Stage 1 gate + Stage 1 toolchain. Review learning and validation before continuing.
+3. [Stage 3: resume to 40](../notebooks/VVC_RL_D_Series_03_Resume30_Kaggle.ipynb). Also attach completed D4 Stage 2 SAFE. Resume latest only; never resume best_validation as a training continuation.
+
+All launchers pin the same immutable functional commit and fingerprint and default to D4. Changing VARIANT to D3 provides a same-source control but requires its own fresh preflight and training. Do not reuse D3/B/Combined checkpoints or gates for D4: weight shapes are not a semantic compatibility test. Start from fresh weights. An interrupted same-version, same-source stage can resume from its non-FAILED SAFE via PARTIAL_STAGE_INPUT. Completed exports are preserved on failure.
+
+The mini protocol stays 16 Train / 4 Validation, 256 frames, all 5 Train rates 50/80/120/160/200, seed 20261120 and the mixed 40-update/80-clip schedule. Validation remains four videos at 50/120/200 every five updates. No Test selection. PPO LR 1e-4, 3 epochs, gamma 1, lambda .95, auxiliary .1 and entropy .01 remain unchanged. Partition/MTS, action duration and joint-action redesign are deferred until there is evidence for a separate intervention.
+
+SAFE can be an intact ZIP or Kaggle-expanded payload.bin plus its hash sidecar; toolchain can be ZIP or an expanded manifest/executable directory. Do not expand the inner payload.bin. The legacy B/V2 launchers remain pinned historical controls. The all-in-one D-series notebook is retained, defaulting to D4 with training disabled.

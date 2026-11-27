@@ -2,7 +2,7 @@ from dataclasses import asdict
 from pathlib import Path
 import hashlib,json,time,shutil,gzip
 import numpy as np
-from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical,LEGACY_STATE,FEEDBACK_STATE,state_shape,UTILITY_SCHEMA,uses_feedback,D_STATES,validate_experiment
+from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical,LEGACY_STATE,FEEDBACK_STATE,state_shape,UTILITY_SCHEMA,uses_feedback,D_STATES,validate_experiment,D4_STATE,BUDGET_VALUE_SCALE
 from .engine import NativeProcess,verify_decode,audit_trace
 from .state import StateBuilder
 from .metrics import task,summary
@@ -15,6 +15,7 @@ def cache_identity(source,profile,rate,encoder,detector_identity,boxes):
 
 def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=RewardConfig(),state_version=LEGACY_STATE,reward_scale=100.):
     if not np.isfinite(reward_scale) or reward_scale<=0:raise ValueError('Invalid reward scale')
+    if state_version==D4_STATE and reward_scale!=BUDGET_VALUE_SCALE:raise ValueError('D4 analytic value requires reward_scale=100')
     reward_config.validate();state_shape(state_version)
     if model is not None or state_version in D_STATES:validate_experiment(state_version,reward_config)
     if model is not None and fixed is not None:raise ValueError('Choose a policy or fixed control, not both')
@@ -58,6 +59,13 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
               state_sha256=hashlib.sha256(x.tobytes()+g.tobytes()).hexdigest(),mse_y_10bit=mse,reconstruction_sha256=hashlib.sha256(recon.tobytes()).hexdigest())
             if model is not None:
                 record.update(log_probability=lp,value=value,entropy_mean=float(out['entropy_mean']),logits=out['logits'].tolist())
+                if state_version==D4_STATE:
+                    expected_offset=reward_scale*price*rew['previous_excess_bits']/state.budget
+                    value_offset=float(out['value_budget_offset'])
+                    if not np.isclose(value_offset,expected_offset,rtol=2e-6,atol=2e-5):
+                        raise ValueError('D4 value offset differs from causal reward budget context')
+                    record.update(value_residual=float(out['value_residual']),value_budget_offset=value_offset,
+                                  value_budget_identity_error=abs(value_offset-expected_offset))
             if uses_feedback(state_version):record['native_feedback']={'poc':poc,'winning_qp':outcome['winning_qp'],'pre_action_ctu_qp':obs['qp']}
             records.append(record);by_poc[str(poc)]={'score':metrics['score'],'matched_iou_f1_v1':metrics['matched_iou_f1_v1'],'bits':outcome['bits']}
             for key,val in [('x',x),('g',g),('actions',actions),('log_prob',lp),('value',value),('reward',rew['train']),('done',k==profile.frames-1),('aux_target',metrics['aux_target']),('aux_weight',metrics['aux_weight'])]:batch[key].append(val)
@@ -73,6 +81,8 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
           'mean_delta_background_ctus':float(actions[occ==0].mean()) if (occ==0).any() else None,
           'per_ctu_distribution':[{str(d):float(np.mean(actions[:,i]==d)) for d in DELTAS} for i in range(12)]}
         result['mean_action_entropy']=float(np.mean([r['entropy_mean'] for r in records])) if model is not None else None
+        if state_version==D4_STATE and model is not None:
+            result['value_budget_identity_error']=max(r['value_budget_identity_error'] for r in records)
         result.update(identity=identity,state_version=state_version,split=split,rate=rate,budget=state.budget,by_poc=by_poc,coding_order=[r['poc'] for r in records],model_sha256=before,deterministic=deterministic,
           anchor_bits=anchor['bits'] if anchor is not None else result['bits'],anchor_quality=anchor['task_retention_f1_v2'] if anchor is not None else result['task_retention_f1_v2'],
           psnr_y_10bit=10*np.log10(1023**2/max(np.mean([r['mse_y_10bit'] for r in records]),1e-30)))
