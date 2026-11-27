@@ -8,16 +8,21 @@ from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash
 from .ppo import PPO,residual_mechanics_ok
 from .collect import collect,load_batches
-from .gates import MANDATORY,binding,write_gate
+from .gates import required_checks,binding,write_gate
 from .native_smoke import run_smoke
 from .artifacts import export_run
 from .train import save_checkpoint,load_checkpoint
 from .reward import RatePrices
 
 def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),workers=2,seed=20261120,reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed',state_version=LEGACY_STATE):
-    root=Path(root);output=Path(output);output.mkdir(parents=True,exist_ok=False);checks={k:False for k in MANDATORY}
-    bind=binding(root,toolchain,profile,workers,reward_config,ppo_config,train_schedule,state_version);evidence=[]
+    root=Path(root);output=Path(output);output.mkdir(parents=True,exist_ok=False)
+    bind=binding(root,toolchain,profile,workers,reward_config,ppo_config,train_schedule,state_version);checks={k:False for k in required_checks(bind)};evidence=[]
     try:
+        if 'validation_selection' in bind:
+            from .data import validation_ground_truth
+            val_gt=validation_ground_truth(input_root,profile.frames)
+            atomic_json(output/'VALIDATION_GT.json',val_gt)
+        else:val_gt={}
         if workers!=2 or not torch.cuda.is_available() or torch.cuda.device_count()<2:raise RuntimeError('Full Kaggle preflight requires two real CUDA collectors; CPU fixture cannot authorize training')
         unit=output/'unit_contracts.log'
         with unit.open('wb') as f:subprocess.run([sys.executable,'-m','unittest','discover','-s',str(root/'tests'),'-p','test_*.py'],cwd=root,stdout=f,stderr=subprocess.STDOUT,check=True)
@@ -38,7 +43,7 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         def specs(videos,split,snapshot,model,tag):
             return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
               snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),reward_scale=ppo_config.reward_scale,state_version=state_version,video=v,split=split,rate=120,price=1.,
-              seed=seed+i,device=f'cuda:{i}',episode_id=f'{tag}_{i}') for i,v in enumerate(videos)]
+              seed=seed+i,device=f'cuda:{i}',episode_id=f'{tag}_{i}',validation_gt=val_gt.get(v) if split=='val' else None) for i,v in enumerate(videos)]
         train=collect(specs(catalog.selected['train'][:2],'train',snapshot,model,'mechanical_train'))
         if {r['device'] for r in train}!={'cuda:0','cuda:1'} or len({r['pid'] for r in train})!=2:raise ValueError('Two-GPU collection contract failed')
         checks['two_gpu_collectors']=True;checks['real_train_rollout']=True
@@ -61,13 +66,24 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         val=collect(specs(catalog.selected['val'][:1],'val',after,model,'validation_no_update'))
         load_batches(val,expected_split='val',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=val_before)
         checks['validation_no_update']=model_hash(model)==val_before and all(r['model_sha256']==val_before for r in val) and all(r['result']['reward_identity_error']<1e-10 for r in val)
+        if val_gt:
+            from .metrics import coco_ap
+            from .config import VALIDATION_SELECTION
+            import importlib.metadata
+            if importlib.metadata.version('pycocotools')!='2.0.11':raise ValueError('COCO AP engine version differs')
+            result=val[0]['result'];proof=result['validation_ap'];base=result['anchor_validation_ap']
+            metrics=coco_ap(proof['ground_truth'],proof['predictions'])
+            anchor_metrics=coco_ap(base['ground_truth'],base['predictions'])
+            checks['validation_gt_ap']=(proof['protocol']==VALIDATION_SELECTION and proof['ground_truth']==base['ground_truth']
+                and metrics==proof['metrics'] and anchor_metrics==base['metrics']
+                and metrics['ap50_95'] is not None and anchor_metrics['ap50_95'] is not None)
         atomic_json(output/'REAL_DATA_SUMMARY.json',{'train':[r['result'] for r in train],'validation':[r['result'] for r in val],
           'policy_changed_on_validation':False,'learning_quality_claim':False,'test_used':False})
         # Bind every stored proof except bulky source/reconstruction, not merely PASS flags.
         evidence=[p for p in output.rglob('*') if p.is_file() and p.suffix!='.yuv' and 'source_cache' not in p.relative_to(output).parts and 'recon' not in p.relative_to(output).parts]
         report=write_gate(output,bind,checks,evidence)
         if report['status']!='PASS_READY_FOR_MINI':raise RuntimeError('Preflight incomplete; training remains blocked')
-        print('FULL_PREFLIGHT_PASS_READY_FOR_MINI — no mini training started',flush=True);return report
+        print('FULL_PREFLIGHT_PASS_READY_FOR_MINI â€” no mini training started',flush=True);return report
     except BaseException as e:
         atomic_json(output/'FAILURE.json',{'type':type(e).__name__,'message':str(e),'training_blocked':True})
         write_gate(output,bind,checks,[p for p in evidence if p.exists()]);raise

@@ -46,3 +46,74 @@ def rollout_summary(rows):
         'requested_action_distribution':{str(d):float(np.mean([r['requested_action_distribution'].get(str(d),0) for r in results])) for d in DELTAS},
         'effective_qg_candidate_counts':{str(d):sum(r['action_audit']['effective_delta_histogram'].get(str(d),0) for r in results) for d in DELTAS},
         'nonzero_requests_zeroed':sum(r['action_audit']['nonzero_requests_zeroed'] for r in results)}
+
+
+def rd_validation_summary(rows,expected_pairs,reward_config=RewardConfig()):
+    """Select on pooled real-label RD curves; teacher metrics remain diagnostics.
+
+    AP pools confidence-ranked predictions across four videos at each rate.
+    Rate is SUM(bits)/SUM(duration), never target rate or AP averaged by frame.
+    Both curves and all cap decisions are retained for auditing.
+    """
+    import hashlib
+    from .config import RATES,VALIDATION_SELECTION,canonical
+    from .metrics import coco_ap,bd_metrics
+    rows=list(rows);pairs=list(expected_pairs)
+    report=validation_summary(rows,pairs,reward_config)
+    videos=sorted({v for v,_ in pairs})
+    if len(videos)!=4 or set(pairs)!={(v,r) for v in videos for r in RATES}:
+        raise ValueError('RD selection requires four Validation videos at all five rates')
+    report.update(selection_metric=VALIDATION_SELECTION,eligible_checkpoint=False,
+                  eligible_utility_checkpoint=False,rd_curves=[],bd_ap50=None,bd_ap50_95=None,
+                  interpretation='Validation-only real-GT RD selection. Teacher F1/utility are diagnostic, never fallback selection.',
+                  selection_reason='incomplete_validation')
+    gt_by_video={}
+    for row in rows:
+        result=row['result'];ap=result.get('validation_ap');anchor=result.get('anchor_validation_ap')
+        if ap is None or anchor is None:raise ValueError('Missing real-label Validation AP; never fall back to F1')
+        for proof in (ap,anchor):
+            frames=proof['ground_truth']
+            if proof['protocol']!=VALIDATION_SELECTION or not frames or any(f['video_id']!=row['video'] for f in frames):
+                raise ValueError('Validation GT/protocol mismatch')
+            if hashlib.sha256(canonical(frames).encode()).hexdigest()!=proof['gt_sha256']:
+                raise ValueError('Validation GT hash mismatch')
+        if any(ap[k]!=anchor[k] for k in ('protocol','gt_sha256','ground_truth')):
+            raise ValueError('Unpaired Validation GT')
+        if row['video'] in gt_by_video and gt_by_video[row['video']]!=ap['ground_truth']:
+            raise ValueError('GT coverage changed between rates')
+        gt_by_video[row['video']]=ap['ground_truth']
+        profile=result['identity']['profile'];duration=profile['frames']/profile['fps']
+        if not np.isfinite(duration) or duration<=0 or not np.isclose(result['actual_kbps'],result['bits']/duration/1000,rtol=0,atol=1e-8):
+            raise ValueError('Validation rate/duration accounting mismatch')
+    if not report['complete']:return report
+    for rate in RATES:
+        current=sorted((x for x in rows if x['result']['rate']==rate),key=lambda x:x['video'])
+        gt=sum([x['result']['validation_ap']['ground_truth'] for x in current],[])
+        duration=sum(x['result']['identity']['profile']['frames']/x['result']['identity']['profile']['fps'] for x in current)
+        point={'target_kbps':rate,'duration_seconds':duration,'videos':len(current)}
+        for name,proof_key,bits_key in (('qpa','anchor_validation_ap','anchor_bits'),('ppo','validation_ap','bits')):
+            predictions=sum([x['result'][proof_key]['predictions'] for x in current],[])
+            point[name]={'actual_kbps':sum(x['result'][bits_key] for x in current)/duration/1000,
+                         **coco_ap(gt,predictions)}
+        report['rd_curves'].append(point)
+    for metric,key in (('ap50','bd_ap50'),('ap50_95','bd_ap50_95')):
+        report[key]=bd_metrics([(p['qpa']['actual_kbps'],p['qpa'][metric]) for p in report['rd_curves']],
+                               [(p['ppo']['actual_kbps'],p['ppo'][metric]) for p in report['rd_curves']])
+    primary=report['bd_ap50_95'];rate,quality=primary['bd_rate_percent'],primary['bd_ap_pp']
+    valid=rate is not None and quality is not None and np.isfinite([rate,quality]).all()
+    report['eligible_checkpoint']=bool(report['feasible'] and valid and rate< -1e-9 and quality>1e-9)
+    report['selection_reason']=('bitrate_cap_failed' if not report['feasible'] else
+        'undefined_rd_overlap' if not valid else 'improving_rd' if report['eligible_checkpoint'] else 'no_joint_rd_improvement')
+    return report
+
+
+def better_rd_checkpoint(report,best):
+    if not report['eligible_checkpoint']:return False
+    candidate=report['bd_ap50_95']
+    if best is None:return True
+    delta=candidate['bd_rate_percent']-best['bd_rate_percent']
+    return delta< -1e-9 or (abs(delta)<=1e-9 and candidate['bd_ap_pp']>best['bd_ap_pp']+1e-9)
+
+
+def selection_progress(best,bind):
+    return {'best_validation_rd':best} if 'validation_selection' in bind else {'best_validation_gain':best}

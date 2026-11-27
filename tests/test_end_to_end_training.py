@@ -52,6 +52,28 @@ def fixture_collect(specs):
         rows.append(dict(folder=str(folder),result=result,video=spec['video']))
     return rows
 
+
+def rd_fixture_collect(specs):
+    """CPU transport fixture; actual AP/BD, PPO, journals and resume remain real."""
+    from vvcrl.config import VALIDATION_SELECTION,canonical,RATES
+    import hashlib
+    rows=fixture_collect(specs)
+    for spec,row in zip(specs,rows):
+        if spec['split']=='train':
+            if spec.get('validation_gt') is not None:raise AssertionError('GT leaked into Train')
+            continue
+        result=row['result'];gt=spec['validation_gt']['frames'];index=RATES.index(spec['rate'])
+        ap={'protocol':VALIDATION_SELECTION,'ground_truth':gt,
+            'gt_sha256':hashlib.sha256(canonical(gt).encode()).hexdigest(),
+            'predictions':[dict(image_id=f['image_id'],boxes=[[0,0,100,100,.9]] if j<index+2 else []) for j,f in enumerate(gt)]}
+        duration=spec['profile']['frames']/30;bits=int(spec['rate']*1000*duration*.9/8)*8
+        result.update(validation_ap=ap,anchor_validation_ap=ap,bits=bits,anchor_bits=spec['rate']*1000*duration,
+                      budget=spec['rate']*1000*duration,actual_kbps=bits/duration/1000)
+        folder=Path(row['folder']);(folder/'stream.266').write_bytes(bytes(bits//8))
+        result['bitstream_sha256']=digest(folder/'stream.266');atomic_json(folder/'result.json',result)
+        atomic_json(folder/'SEAL.json',{p.name:digest(p) for p in folder.iterdir() if p.name!='SEAL.json'})
+    return rows
+
 class EndToEndTests(unittest.TestCase):
     def test_incomplete_seal_rejected(self):
         with tempfile.TemporaryDirectory() as d:
@@ -61,13 +83,20 @@ class EndToEndTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Duplicate rollout'):load_batches([{'folder':'same'},{'folder':'same'}])
     def test_training_export_import_resume_exact(self):
         torch.set_num_threads(1)
-        variants=[(LEGACY_STATE,'task-budget-v2'),(FEEDBACK_STATE,'task-budget-v2'),(LEGACY_STATE,'task-budget-v3-progressive'),(LEGACY_STATE,'task-budget-v2-soft-iou'),(FEEDBACK_STATE,'task-budget-v3-progressive-soft-iou'),(D1_STATE,COMBINED_REWARD),(D1_ISOLATED_STATE,COMBINED_REWARD),(D2_STATE,COMBINED_REWARD),(D2_NEUTRAL_STATE,COMBINED_REWARD),(D3_STATE,ONLINE_REWARD),(D4_STATE,ONLINE_REWARD)]
-        for version,reward_version in variants:
+        variants=[(LEGACY_STATE,'task-budget-v2'),(FEEDBACK_STATE,'task-budget-v2'),(LEGACY_STATE,'task-budget-v3-progressive'),(LEGACY_STATE,'task-budget-v2-soft-iou'),(FEEDBACK_STATE,'task-budget-v3-progressive-soft-iou'),(D1_STATE,COMBINED_REWARD),(D1_ISOLATED_STATE,COMBINED_REWARD),(D2_STATE,COMBINED_REWARD),(D2_NEUTRAL_STATE,COMBINED_REWARD),(D3_STATE,ONLINE_REWARD),(D4_STATE,ONLINE_REWARD),(D4_STATE,ONLINE_REWARD,'GT-RD')]
+        for variant in variants:
+            version,reward_version=variant[:2];rd=len(variant)==3
             with self.subTest(version=version,reward=reward_version),tempfile.TemporaryDirectory() as tmp:
                 root=Path(tmp);cfg=RewardConfig(reward_version);bind={'state_version':version,'reward':asdict(cfg),'ppo':asdict(PPOConfig())}
+                if rd:
+                    from vvcrl.config import VALIDATION_SELECTION
+                    bind['validation_selection']=VALIDATION_SELECTION
+                class Catalog(MockCatalog):
+                    selected=dict(MockCatalog.selected,val=['val_a','val_b','val_c','val_d']) if rd else MockCatalog.selected
+                gt={v:{'frames':[dict(image_id=i*100+j,video_id=v,poc=j*6,boxes=[[0,0,100,100]]) for j in range(6)]} for i,v in enumerate(Catalog.selected['val'])}
                 def run(out,updates,resume=None):
                     return train.mini_train(root,out,root/'gate',{'encoder':'fixture_encoder','decoder':'fixture_decoder'},root,root,updates=updates,val_every=1,profile=Profile(frames=32),seed=20261120,authorized=True,resume=resume,reward_config=cfg,state_version=version)
-                with patch('vvcrl.train.binding',return_value=bind),patch('vvcrl.train.require_gate'),patch('vvcrl.train.VideoCatalog',MockCatalog),patch('vvcrl.train.collect',side_effect=fixture_collect):
+                with patch('vvcrl.train.binding',return_value=bind),patch('vvcrl.train.require_gate'),patch('vvcrl.train.VideoCatalog',Catalog),patch('vvcrl.data.validation_ground_truth',return_value=gt),patch('vvcrl.train.collect',side_effect=rd_fixture_collect if rd else fixture_collect):
                     a=root/'uninterrupted';self.assertEqual(run(a,2)['iteration'],2)
                     b=root/'first';self.assertEqual(run(b,1)['iteration'],1)
                     restored=root/'restored';import_run(root/'VVC_RL_MINI_first_SAFE.zip',restored)
@@ -83,3 +112,10 @@ class EndToEndTests(unittest.TestCase):
                     self.assertEqual(json.loads((a/'updates'/f'{step}.json').read_text()),json.loads((restored/'updates'/f'{step}.json').read_text()))
                     self.assertEqual(json.loads((a/'validations'/f'{step}.json').read_text()),json.loads((restored/'validations'/f'{step}.json').read_text()))
                 self.assertFalse(json.loads((restored/'PROGRESS.json').read_text())['validation_pending'])
+                if rd:
+                    report=json.loads((restored/'validations/000002.json').read_text())
+                    self.assertEqual(len(report['points']),20);self.assertTrue(report['eligible_checkpoint'])
+                    self.assertLess(report['bd_ap50_95']['bd_rate_percent'],0)
+                    self.assertIsInstance(cb['best_validation'],dict)
+                    self.assertNotIn('best_validation_gain',json.loads((restored/'PROGRESS.json').read_text()))
+                    self.assertFalse((restored/'checkpoints/best_utility.pt').exists())

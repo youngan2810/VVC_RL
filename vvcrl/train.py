@@ -8,7 +8,7 @@ from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash,state_dict_hash
 from .ppo import PPO,policy_state_diagnostics
 from .reward import RatePrices
-from .validation import validation_summary,rollout_summary
+from .validation import validation_summary,rd_validation_summary,better_rd_checkpoint,selection_progress,rollout_summary
 from .collect import collect,load_batches
 from .gates import binding,require_gate
 from .artifacts import export_run
@@ -84,7 +84,7 @@ def resume_progress(output,state):
     output=Path(output);latest=output/'checkpoints/latest.pt'
     progress=json.loads((output/'PROGRESS.json').read_text())
     expected={str(k):state[k] for k in ('iteration','episodes')}
-    if any(progress.get(k)!=v for k,v in expected.items()) or progress.get('checkpoint')!='checkpoints/latest.pt' or progress.get('checkpoint_sha256')!=digest(latest) or progress.get('best_validation_gain')!=state['best_validation']:
+    if any(progress.get(k)!=v for k,v in expected.items()) or progress.get('checkpoint')!='checkpoints/latest.pt' or progress.get('checkpoint_sha256')!=digest(latest) or any(progress.get(k)!=v for k,v in selection_progress(state['best_validation'],state.get('binding',{})).items()):
         raise ValueError('Resume journal/checkpoint mismatch; recover last intact SAFE export')
     if type(progress.get('validation_pending')) is not bool:raise ValueError('Resume validation journal missing')
     expected_ids={f'{i:06}' for i in range(1,state['iteration']+1)}
@@ -110,14 +110,23 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
     if not authorized:raise RuntimeError('Training disabled: explicitly pass --start-mini-training after reviewing full preflight')
     root=Path(root);output=Path(output);bind=binding(root,toolchain,profile,2,reward_config,ppo_config,train_schedule,state_version);require_gate(preflight,bind)
     if type(updates) is not int or type(val_every) is not int or type(seed) is not int or updates<0 or (updates==0 and not resume) or val_every<1 or seed<0 or not math.isfinite(hours) or not 0<hours<=11.75:raise ValueError('Invalid update budget, seed, validation cadence or hours')
+    rd_selection='validation_selection' in bind
+    if rd_selection:
+        from .data import validation_ground_truth
+        val_gt=validation_ground_truth(input_root,profile.frames)
+    else:val_gt={}
     run_contract=run_protocol(output,seed,val_every,resume)
     output.mkdir(parents=True,exist_ok=True);protocol=output/'TRAIN_BINDING.json'
     if resume and not protocol.is_file():raise ValueError('Resume training binding missing')
     invocation=uuid.uuid4().hex[:12]
     if protocol.exists() and json.loads(protocol.read_text())!=bind:raise ValueError('Output contains a different experiment')
-    if not resume:atomic_json(protocol,bind);atomic_json(output/'RUN_PROTOCOL.json',run_contract)
+    if not resume:
+        atomic_json(protocol,bind);atomic_json(output/'RUN_PROTOCOL.json',run_contract)
+        if rd_selection:atomic_json(output/'VALIDATION_GT.json',val_gt)
+    elif rd_selection and json.loads((output/'VALIDATION_GT.json').read_text())!=val_gt:
+        raise ValueError('Resume Validation GT coverage/identity differs')
     torch.set_num_threads(1);torch.manual_seed(seed)
-    model=ActorCritic(state_version);ppo=PPO(model,ppo_config);prices=RatePrices();iteration=episodes=0;best=0.;pending=False
+    model=ActorCritic(state_version);ppo=PPO(model,ppo_config);prices=RatePrices();iteration=episodes=0;best=None if rd_selection else 0.;pending=False
     if resume:
         state=load_checkpoint(resume,model,ppo,bind);iteration=state['iteration'];episodes=state['episodes'];seed=state['seed'];best=state['best_validation']
         if seed!=run_contract['seed']:raise ValueError('Checkpoint seed differs from run protocol')
@@ -130,22 +139,22 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
     def specs(items,split,snapshot,tag):
         return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
           snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),reward_scale=ppo_config.reward_scale,state_version=state_version,video=v,split=split,rate=r,price=prices.values[str(r)],
-          seed=seed+episodes+i,device=f'cuda:{i}',episode_id=f'{invocation}_{tag}_{i}') for i,(v,r) in enumerate(items)]
+          seed=seed+episodes+i,device=f'cuda:{i}',episode_id=f'{invocation}_{tag}_{i}',validation_gt=val_gt.get(v) if split=='val' else None) for i,(v,r) in enumerate(items)]
     latest=output/'checkpoints/latest.pt'
     def publish(pending):
         save_checkpoint(latest,model,ppo,prices,iteration,episodes,bind,best,seed)
-        atomic_json(output/'PROGRESS.json',{'iteration':iteration,'episodes':episodes,'checkpoint':'checkpoints/latest.pt','best_validation_gain':best,'checkpoint_sha256':digest(latest),'validation_pending':pending})
+        atomic_json(output/'PROGRESS.json',{'iteration':iteration,'episodes':episodes,'checkpoint':'checkpoints/latest.pt',**selection_progress(best,bind),'checkpoint_sha256':digest(latest),'validation_pending':pending})
     def finish_validation():
         nonlocal best
         val_snapshot=output/'snapshots'/f'validation_{iteration:06}.pt'
         val_snapshot.parent.mkdir(exist_ok=True)
         torch.save({'model':model.state_dict(),'state_version':state_version},val_snapshot)
-        val_items=list(itertools.product(catalog.selected['val'],(50,120,200)));validation=[];before=model_hash(model)
+        val_items=list(itertools.product(catalog.selected['val'],RATES if rd_selection else (50,120,200)));validation=[];before=model_hash(model)
         for j in range(0,len(val_items),2):
             if time.monotonic()>deadline-900:break
             validation+=collect(specs(val_items[j:j+2],'val',val_snapshot,f'val_update{iteration:06}_batch{j:03}'))
         if model_hash(model)!=before:raise ValueError('Validation changed model')
-        report=validation_summary(validation,val_items,reward_config)
+        report=(rd_validation_summary if rd_selection else validation_summary)(validation,val_items,reward_config)
         score=report['macro_delta_quality']
         val_batch=load_batches(validation,expected_split='val',state_version=state_version,reward_config=reward_config,reward_scale=ppo_config.reward_scale,expected_model=before) if validation else None
         report.update(model_unchanged=True,model_sha256=before,rollout_diagnostics=rollout_summary(validation),
@@ -156,7 +165,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
             if model_hash(model)!=before:raise ValueError('State diagnostics modified policy')
         atomic_json(output/'validations'/f'{iteration:06}.json',report)
         if not report['complete']:return False
-        if state_version in D_STATES and report['eligible_utility_checkpoint']:
+        if not rd_selection and state_version in D_STATES and report['eligible_utility_checkpoint']:
             # Secondary diagnostic checkpoint; F1 remains the preregistered
             # primary criterion and resume always uses latest. Exclude current
             # iteration so a pending validation can be safely rerun.
@@ -164,7 +173,10 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
             prior_best=max([0.]+[r['macro_delta_utility'] for r in previous if r.get('eligible_utility_checkpoint')])
             if report['macro_delta_utility']>prior_best:
                 save_checkpoint(output/'checkpoints/best_utility.pt',model,ppo,prices,iteration,episodes,bind,best,seed)
-        if report['eligible_checkpoint'] and score>best:
+        if rd_selection and better_rd_checkpoint(report,best):
+            best={**report['bd_ap50_95'],'iteration':iteration}
+            save_checkpoint(output/'checkpoints/best_validation.pt',model,ppo,prices,iteration,episodes,bind,best,seed)
+        elif not rd_selection and report['eligible_checkpoint'] and score>best:
             best=score;save_checkpoint(output/'checkpoints/best_validation.pt',model,ppo,prices,iteration,episodes,bind,best,seed)
         publish(False)
         return True
@@ -172,7 +184,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
         if pending:
             # Never advance the train schedule past an incomplete selection point.
             pending=not finish_validation()
-            if pending:return {'iteration':iteration,'episodes':episodes,'best_validation_gain':best,'validation_pending':True}
+            if pending:return {'iteration':iteration,'episodes':episodes,**selection_progress(best,bind),'validation_pending':True}
         for _ in range(updates):
             if time.monotonic()>deadline-900:break
             snapshot=output/'snapshots'/f'collector_{iteration:06}.pt';snapshot.parent.mkdir(exist_ok=True)
@@ -191,7 +203,7 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
             export_training_run(output,invocation)
             print('MINI_UPDATE_COMPLETE',iteration,episodes,stats,'validation_pending',pending,flush=True)
             if pending:break
-        return {'iteration':iteration,'episodes':episodes,'best_validation_gain':best,'validation_pending':pending}
+        return {'iteration':iteration,'episodes':episodes,**selection_progress(best,bind),'validation_pending':pending}
     finally:
         if sys.exc_info()[0] is None:export_training_run(output,invocation)
         else:

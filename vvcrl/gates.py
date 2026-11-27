@@ -15,11 +15,21 @@ def binding(root,toolchain,profile,workers=2,reward_config=RewardConfig(),ppo_co
     profile.validate();reward_config.validate();ppo_config.validate();validate_experiment(state_version,reward_config)
     if state_version==D4_STATE and ppo_config.reward_scale!=BUDGET_VALUE_SCALE:raise ValueError('D4 analytic value requires reward_scale=100')
     if train_schedule not in ('blocked','mixed'):raise ValueError('Unknown training schedule')
-    return {'schema':SCHEMA,'task':TASK,'source_sha256':fingerprint(root),'profile':asdict(profile),'ppo':asdict(ppo_config),'train_schedule':train_schedule,'reward':asdict(reward_config),'detector':DETECTOR_ID,
+    result={'schema':SCHEMA,'task':TASK,'source_sha256':fingerprint(root),'profile':asdict(profile),'ppo':asdict(ppo_config),'train_schedule':train_schedule,'reward':asdict(reward_config),'detector':DETECTOR_ID,
       'binary_sha256':{k:digest(toolchain[k]) for k in ('encoder','vanilla','decoder')},'workers':workers,'environment':environment(),'state_version':state_version,'utility_schema':UTILITY_SCHEMA,'optimization_utility':reward_config.utility}
+    if state_version==D4_STATE:
+        from .config import VALIDATION_SELECTION
+        import importlib.metadata
+        if importlib.metadata.version('pycocotools')!='2.0.11':raise ValueError('COCO AP engine must be pycocotools==2.0.11')
+        result['validation_selection']=VALIDATION_SELECTION
+        result['metric_environment']={k:importlib.metadata.version(k) for k in ('pycocotools','scipy')}
+    return result
+def required_checks(bind):
+    return (*MANDATORY,*(('validation_gt_ap',) if 'validation_selection' in bind else ()))
+
 def write_gate(folder,bind,checks,evidence):
     folder=Path(folder)
-    if set(checks)!=set(MANDATORY):raise ValueError('Preflight checklist incomplete')
+    if set(checks)!=set(required_checks(bind)):raise ValueError('Preflight checklist incomplete')
     all_ok=all(v is True for v in checks.values())
     report={'schema':SCHEMA,'status':'PASS_READY_FOR_MINI' if all_ok else 'FAIL_TRAINING_BLOCKED','binding':bind,'checks':checks,
       'evidence':{str(Path(p).relative_to(folder)):digest(p) for p in evidence},'training_performed':'one mechanical PPO update on train only; no mini training'}
@@ -28,7 +38,7 @@ def require_gate(folder,expected):
     folder=Path(folder);p=folder/'PREFLIGHT_GATE.json'
     if not p.exists():raise RuntimeError('Training blocked: run the full real-data preflight first')
     r=json.loads(p.read_text())
-    if r.get('status')!='PASS_READY_FOR_MINI' or set(r.get('checks',{}))!=set(MANDATORY) or not all(v is True for v in r['checks'].values()):raise RuntimeError('Training blocked: incomplete/failed preflight')
+    if r.get('status')!='PASS_READY_FOR_MINI' or set(r.get('checks',{}))!=set(required_checks(expected)) or not all(v is True for v in r['checks'].values()):raise RuntimeError('Training blocked: incomplete/failed preflight')
     if r['binding']!=expected:raise RuntimeError('Training blocked: source/profile/optimizer/toolchain/environment differs from preflight')
     for n,h in r['evidence'].items():
         p=(folder/n).resolve()

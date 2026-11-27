@@ -12,3 +12,7 @@ pillow
 tqdm
 psutil
 opencv-python-headless
+
+# Real-label Validation AP (same COCO protocol as frozen Test).
+pyarrow
+pycocotools==2.0.11

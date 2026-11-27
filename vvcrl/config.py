@@ -135,3 +135,20 @@ def fingerprint(root):
 def atomic_json(path,value):
     p=Path(path);p.parent.mkdir(parents=True,exist_ok=True);tmp=p.with_name(p.name+'.tmp')
     tmp.write_text(json.dumps(value,indent=2,allow_nan=False)+'\n',encoding='utf-8');tmp.replace(p)
+
+
+VALIDATION_SELECTION={
+    'schema':'val-gt-rd-selection/1',
+    'primary':'min_pooled_bd_rate_ap50_95',
+    'tie_break':'max_pooled_bd_ap50_95_pp_then_earlier_update',
+    'rates':list(RATES),'videos':4,'split':'val','class':'car',
+    'confidence':.001,'nms_iou':.45,'max_dets':300,'fp32':True,
+    'ap':'COCO bbox area-all, 101 recalls, IoU .50:.05:.95',
+    'ap_engine':'pycocotools==2.0.11',
+    'bd':'PCHIP Pareto frontier, actual pooled kbps, common domain only',
+    'annotation_sha256':'e296934ebba47f360fb49a61060d5dfc6027f91a8655b96b565ece7ac1599e02',
+    'mapping':'MOT frameIndex * 6 = normalized 30fps POC, offset 0',
+    'cap':'all 20 pairs <= (1+tolerance)*min(target_bits,QPA_bits)',
+    'eligible':'BD-rate AP50:95 < 0 and BD-AP50:95 > 0, both defined',
+    'reward_unchanged':True,'test_used':False,
+}

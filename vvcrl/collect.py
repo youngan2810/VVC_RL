@@ -11,17 +11,21 @@ from .episode import run_episode,verified_result,cache_identity
 from .controls import roi_action,roi_pair_action
 
 def anchor_episode(spec,detector,source,boxes,profile):
-    key=hashlib.sha256(canonical({'video':spec['video'],'split':spec['split'],'decoder':digest(spec['decoder']),'pixel':digest(source),'teacher_sha256':hashlib.sha256(canonical(boxes).encode()).hexdigest(),'frames':profile.frames,'rate':spec['rate'],'encoder':digest(spec['encoder']),'detector':DETECTOR_ID,'profile':asdict(profile),'task':'task_retention_f1_v2','utility_schema':UTILITY_SCHEMA,'reward':spec.get('reward_config',{}),'reward_scale':spec.get('reward_scale',100.)}).encode()).hexdigest()
+    key=hashlib.sha256(canonical({'video':spec['video'],'split':spec['split'],'decoder':digest(spec['decoder']),'pixel':digest(source),'teacher_sha256':hashlib.sha256(canonical(boxes).encode()).hexdigest(),'frames':profile.frames,'rate':spec['rate'],'encoder':digest(spec['encoder']),'detector':DETECTOR_ID,'profile':asdict(profile),'task':'task_retention_f1_v2','utility_schema':UTILITY_SCHEMA,'reward':spec.get('reward_config',{}),'reward_scale':spec.get('reward_scale',100.),'validation_gt':spec.get('validation_gt')}).encode()).hexdigest()
     base=Path(spec['output'])/'anchors'/key;base.mkdir(parents=True,exist_ok=True)
     for p in sorted(base.glob('attempt*')):
         r=verified_result(p)
         if r is not None:
             if r['split']!=spec['split'] or r['reward_config']!=asdict(RewardConfig(**spec.get('reward_config',{}))) or r['reward_scale']!=spec.get('reward_scale',100.) or r['identity']!=cache_identity(source,profile,spec['rate'],spec['encoder'],DETECTOR_ID,boxes):raise ValueError('Anchor cache contract mismatch')
             if r['model_sha256'] is not None or r['requested_action_distribution'].get('0')!=1. or r['anchor_bits']!=r['bits'] or r['anchor_quality']!=r['task_retention_f1_v2']:raise ValueError('Cached anchor is not a verified no-op')
+            if spec.get('validation_gt') is not None:
+                gt=spec['validation_gt'];ap=r.get('validation_ap',{})
+                if ap.get('gt_sha256')!=gt['gt_sha256'] or ap.get('protocol')!=gt['protocol'] or ap.get('ground_truth')!=gt['frames']:
+                    raise ValueError('Cached anchor lacks exact Validation GT/AP')
             return r
     folder=base/f'attempt{len(list(base.glob("attempt*"))):03}'
     r,_=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
-      profile=profile,rate=spec['rate'],folder=folder,split=spec['split'],deterministic=True,reward_config=RewardConfig(**spec.get('reward_config',{})),reward_scale=spec.get('reward_scale',100.))
+      profile=profile,rate=spec['rate'],folder=folder,split=spec['split'],deterministic=True,reward_config=RewardConfig(**spec.get('reward_config',{})),reward_scale=spec.get('reward_scale',100.),validation_gt=spec.get('validation_gt'))
     return r
 
 def _worker(spec):
@@ -50,7 +54,7 @@ def _worker(spec):
             fixed=lambda obs:roi_pair_action(boxes[obs['poc']],rd,bd);policy=None
         elif control!='ppo':raise ValueError('Unknown diagnostic control')
         result,batch=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
-          profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'],reward_config=RewardConfig(**spec.get('reward_config',{})),state_version=version,reward_scale=spec.get('reward_scale',100.))
+          profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'],reward_config=RewardConfig(**spec.get('reward_config',{})),state_version=version,reward_scale=spec.get('reward_scale',100.),validation_gt=spec.get('validation_gt'))
         cache_meta=json.loads((cache/key/'cache.json').read_text())
         atomic_json(folder/'collector.json',{'video':spec['video'],'split':spec['split'],'device':spec['device'],'model_sha256':model_hash(model),'input_cache_key':key,'seed':spec['seed'],
           'control':control,'source_stage_timing':cache_meta.get('timing'),'state_version':version,'reward_config':result['reward_config'],'reward_scale':result['reward_scale']})
