@@ -98,8 +98,11 @@ cancellation through intermediate shaped Critic values. Only V(s_t) is subtracte
 for the Actor baseline; the Critic's known budget offset is subtracted once from
 its neural target. Done masks isolate clips and terminal excess cost. Reward,
 cap, state, architecture, argmax and native code are unchanged. PPOConfig's
-historical default remains .95; CLI D4 defaults to 1, launchers pass it explicitly,
-and binding/checkpoint/gate checks include the chosen value.
+historical dataclass default remains .95; resolve_ppo_config selects D4 lambda=1
+when no config is supplied. CLI, PPO, binding, preflight, mini_train and diagnose
+all use that resolver; launchers pass the choice explicitly. An explicit
+PPOConfig(gae_lambda=.95) remains a separate control, not an automatic fallback.
+Binding/checkpoint/gate checks include the chosen value.
 
 Read-only diagnostics now include the 25 joint ROI/background pairs (only when
 both regions are present), pair probabilities, executed/argmax counts, observed
@@ -124,3 +127,47 @@ config and environment checks reject old D4 training resume. Same-revision SAFE
 resume restores optimizer/RNG/prices and is checked against uninterrupted CPU
 orchestration. Historical launchers remain pinned. No new full-data/GPU training
 or improved VVC performance has been established by this source revision.
+
+
+## Runtime and publication consistency
+
+Use `python scripts/verify_notebook.py --scope runtime` in a runtime checkout.
+It verifies tracked raw bytes against Git, rejects untracked functional inputs,
+and reports the functional fingerprint. Supply `--expected-source-sha256` from
+the matching downloaded launcher to also enforce that external source identity.
+This scope does not compare old notebook metadata inside a runtime commit with
+new functional source. The staged launcher independently pins the exact commit
+and fingerprint; neither check is bypassed.
+
+Use `--scope distribution` at the published branch head to additionally verify
+the historical B launcher and all four current D-series launcher pins, credit
+modes and gate arguments. CI explicitly uses this scope. A publication commit
+can pin the preceding functional commit without a circular hash requirement.
+Both scopes still validate raw checkout bytes; runtime scope is not a relaxed
+fingerprint or preflight gate.
+
+## Optional D4 fixed-control GT RD diagnosis
+
+The `diagnose` entry point resolves D4 to `rd` mode and rejects legacy/compact
+teacher-only modes for D4. It uses exactly four locked Validation videos, all
+five rates, the original GT loader/AP/BD implementation, the original QPA caps,
+and the frozen checkpoint's rate prices. Controls are preregistered: PPO,
+ROI0/BG+1, ROI-1/BG+1, ROI-2/BG+1 and ROI0/BG-1. No Test videos are used.
+
+This is NOT part of preflight or automatic training. Before live collection,
+the caller must explicitly authorize `--max-diagnostic-encodes 120` (or an API
+max_encodes budget at least that large). The upper bound includes 100 candidate
+encodes plus 20 uncached paired QPA anchors, each 256 frames in the standard
+profile; cached anchors can reduce actual work. With the default budget zero,
+it stops BEFORE any native collection. Do not run it merely to test imports.
+
+Reports show AP50 and AP50:95 RD against QPA and PPO-versus-each-fixed-control
+BD metrics, with the reference/candidate labels and BOTH methods' cap flags.
+The fixed controls are reported individually, never selected by Validation.
+No checkpoint is saved or selected; teacher metrics remain diagnostic and
+cannot substitute for missing GT or undefined BD overlap. Validation comparison
+alone is not proof of generalization or that policy diversity is useful.
+Missing labels or a failed control aborts without native fallback to teacher
+metrics. A failed SAFE has a unique FAILED name and cannot overwrite a previous
+completed control report. Old teacher-only protocols remain explicitly labelled
+historical paths for non-D4 states.

@@ -97,7 +97,8 @@ class EndToEndTests(unittest.TestCase):
                     selected=dict(MockCatalog.selected,val=['val_a','val_b','val_c','val_d']) if rd else MockCatalog.selected
                 gt={v:{'frames':[dict(image_id=i*100+j,video_id=v,poc=j*6,boxes=[[0,0,100,100]]) for j in range(6)]} for i,v in enumerate(Catalog.selected['val'])}
                 def run(out,updates,resume=None):
-                    return train.mini_train(root,out,root/'gate',{'encoder':'fixture_encoder','decoder':'fixture_decoder'},root,root,updates=updates,val_every=1,profile=Profile(frames=32),seed=20261120,authorized=True,resume=resume,reward_config=cfg,ppo_config=pc,state_version=version)
+                    config_args={} if variant[-1]=='GT-RD-MC' else {'ppo_config':pc}
+                    return train.mini_train(root,out,root/'gate',{'encoder':'fixture_encoder','decoder':'fixture_decoder'},root,root,updates=updates,val_every=1,profile=Profile(frames=32),seed=20261120,authorized=True,resume=resume,reward_config=cfg,state_version=version,**config_args)
                 with patch('vvcrl.train.binding',return_value=bind),patch('vvcrl.train.require_gate'),patch('vvcrl.train.VideoCatalog',Catalog),patch('vvcrl.data.validation_ground_truth',return_value=gt),patch('vvcrl.train.collect',side_effect=rd_fixture_collect if rd else fixture_collect):
                     a=root/'uninterrupted';self.assertEqual(run(a,2)['iteration'],2)
                     b=root/'first';self.assertEqual(run(b,1)['iteration'],1)

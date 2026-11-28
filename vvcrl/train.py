@@ -3,7 +3,7 @@ from pathlib import Path
 import itertools,json,time,uuid,math,sys
 import numpy as np
 import torch
-from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest,LEGACY_STATE,CHECKPOINT_SCHEMA,D_STATES
+from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest,LEGACY_STATE,CHECKPOINT_SCHEMA,D_STATES,resolve_ppo_config
 from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash,state_dict_hash
 from .ppo import PPO,policy_state_diagnostics
@@ -106,8 +106,9 @@ def export_training_run(output,invocation,failed=False):
     destination=output.parent/(name+(f'_FAILED_{invocation}' if failed else '')+'_SAFE.zip')
     return export_run(output,destination)
 
-def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val_every=5,profile=Profile(),seed=20261120,resume=None,authorized=False,hours=10.,reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed',state_version=LEGACY_STATE):
+def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val_every=5,profile=Profile(),seed=20261120,resume=None,authorized=False,hours=10.,reward_config=RewardConfig(),ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE):
     if not authorized:raise RuntimeError('Training disabled: explicitly pass --start-mini-training after reviewing full preflight')
+    ppo_config=resolve_ppo_config(state_version,ppo_config)
     root=Path(root);output=Path(output);bind=binding(root,toolchain,profile,2,reward_config,ppo_config,train_schedule,state_version);require_gate(preflight,bind)
     if type(updates) is not int or type(val_every) is not int or type(seed) is not int or updates<0 or (updates==0 and not resume) or val_every<1 or seed<0 or not math.isfinite(hours) or not 0<hours<=11.75:raise ValueError('Invalid update budget, seed, validation cadence or hours')
     rd_selection='validation_selection' in bind

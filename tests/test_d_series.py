@@ -161,7 +161,7 @@ class DSeriesTests(unittest.TestCase):
                 np.testing.assert_allclose(z['returns_residual']+z['value_budget_offset'],z['returns'],atol=2e-6)
                 a,_=gae(b['reward'],b['value'],b['done'],1.,1.)
                 np.testing.assert_array_equal(z['advantage_monte_carlo'],a)
-            bind=dict(state_version=D4_STATE,reward=asdict(RewardConfig(ONLINE_REWARD)),ppo=asdict(PPOConfig()),source_sha256='fixture')
+            bind=dict(state_version=D4_STATE,reward=asdict(RewardConfig(ONLINE_REWARD)),ppo=asdict(ppo.config),source_sha256='fixture')
             save_checkpoint(path/'latest.pt',m,ppo,RatePrices(),1,2,bind,0.,111)
             restored=ActorCritic(D4_STATE);rp=PPO(restored);load_checkpoint(path/'latest.pt',restored,rp,bind)
             self.assertEqual(model_hash(m),model_hash(restored))

@@ -3,7 +3,7 @@ from pathlib import Path
 import json,subprocess,sys,time
 import numpy as np
 import torch
-from .config import Profile,PPOConfig,RewardConfig,atomic_json,digest,LEGACY_STATE
+from .config import Profile,PPOConfig,RewardConfig,atomic_json,digest,LEGACY_STATE,resolve_ppo_config
 from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash
 from .ppo import PPO,residual_mechanics_ok
@@ -14,7 +14,8 @@ from .artifacts import export_run
 from .train import save_checkpoint,load_checkpoint
 from .reward import RatePrices
 
-def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),workers=2,seed=20261120,reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed',state_version=LEGACY_STATE):
+def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),workers=2,seed=20261120,reward_config=RewardConfig(),ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE):
+    ppo_config=resolve_ppo_config(state_version,ppo_config)
     root=Path(root);output=Path(output);output.mkdir(parents=True,exist_ok=False)
     bind=binding(root,toolchain,profile,workers,reward_config,ppo_config,train_schedule,state_version);checks={k:False for k in required_checks(bind)};evidence=[]
     try:

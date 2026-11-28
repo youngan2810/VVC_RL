@@ -3,6 +3,25 @@ import ast,json,sys,subprocess,tempfile
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from vvcrl.config import fingerprint
+from vvcrl.repository import verify_checkout
+
+def verify_runtime(root=ROOT,expected_source_sha256=None):
+    """Verify the checked-out runtime, independently of distributed notebooks.
+
+    Notebook pins are publication metadata, excluded from the functional hash.
+    A runtime commit can legitimately carry older launchers. Do not compare
+    their historical pins against this runtime's fingerprint.
+    """
+    root=Path(root)
+    count=verify_checkout(root)
+    extra=subprocess.check_output(['git','-C',str(root),'ls-files','--others','--exclude-standard','--',
+        'vvcrl','native','vendor','configs','scripts','tests'],text=True)
+    if extra.strip():raise ValueError('Untracked functional source present')
+    actual=fingerprint(root)
+    if expected_source_sha256 is not None and actual!=expected_source_sha256:
+        raise ValueError('Runtime functional fingerprint differs from requested source')
+    print('RUNTIME_SOURCE_PASS',count,actual,flush=True)
+    return actual
 
 def verify_d_series(root=ROOT):
     """Check all current launchers together; historical B stays separately pinned."""
@@ -75,4 +94,10 @@ def verify(root=ROOT):
     print('NOTEBOOK_SOURCE_PIN_PASS',pinned,'CURRENT_FUNCTIONAL_SOURCE',actual,flush=True);return pinned
 
 if __name__=='__main__':
-    verify();verify_d_series()
+    import argparse
+    parser=argparse.ArgumentParser(description='Verify runtime bytes or the full published notebook distribution')
+    parser.add_argument('--scope',choices=['runtime','distribution'],default='runtime')
+    parser.add_argument('--expected-source-sha256')
+    args=parser.parse_args()
+    verify_runtime(expected_source_sha256=args.expected_source_sha256)
+    if args.scope=='distribution':verify();verify_d_series()

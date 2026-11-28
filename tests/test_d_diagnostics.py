@@ -5,7 +5,7 @@ import torch
 from vvcrl.config import D2_STATE,D3_STATE,D4_STATE,ONLINE_STATES,RewardConfig,COMBINED_REWARD,ONLINE_REWARD
 from vvcrl.model import ActorCritic,model_hash
 from vvcrl.ppo import PPO,residual_mechanics_ok,gae,joint_diagnostics
-from vvcrl.config import PPOConfig
+from vvcrl.config import PPOConfig,resolve_ppo_config,LEGACY_STATE,VALIDATION_SELECTION,RATES
 from vvcrl.policy_diagnostics import validation_policy_diagnostics
 from vvcrl.artifacts import export_run,import_run
 from vvcrl.diagnose import rate_conditioned_fixed
@@ -123,3 +123,129 @@ class DiagnosticsTests(unittest.TestCase):
                 with patch('sys.argv',args),patch('vvcrl.preflight.full_preflight') as run:
                     main()
                     self.assertEqual(run.call_args.kwargs['ppo_config'].gae_lambda,wanted)
+            args=['vvcrl','diagnose','--output',str(Path(tmp)/'diag'),'--toolchain',str(tools),
+                  '--preflight',str(Path(tmp)/'gate'),'--resume',str(Path(tmp)/'model.pt'),
+                  '--state-version',D4_STATE,'--reward-version',ONLINE_REWARD,'--max-diagnostic-encodes','120']
+            with patch('sys.argv',args),patch('vvcrl.diagnose.diagnose') as run:
+                main()
+                self.assertEqual(run.call_args.kwargs['max_encodes'],120)
+                self.assertEqual(run.call_args.kwargs['mode'],'auto')
+                self.assertEqual(run.call_args.kwargs['ppo_config'].gae_lambda,1.)
+
+    def test_shared_ppo_defaults_and_explicit_control_across_python_entries(self):
+        from unittest.mock import patch
+        from dataclasses import asdict
+        from vvcrl.config import Profile
+        from vvcrl.gates import binding
+        from vvcrl.preflight import full_preflight
+        from vvcrl.train import mini_train
+        self.assertEqual(resolve_ppo_config(LEGACY_STATE).gae_lambda,.95)
+        self.assertEqual(resolve_ppo_config(D3_STATE).gae_lambda,.95)
+        self.assertEqual(PPO(ActorCritic(D4_STATE)).config.gae_lambda,1.)
+        explicit=PPOConfig(gae_lambda=.95)
+        self.assertIs(resolve_ppo_config(D4_STATE,explicit),explicit)
+        with self.assertRaises(ValueError):resolve_ppo_config(D4_STATE,{'gae_lambda':1.})
+        class StopProbe(Exception):pass
+        for supplied,wanted in ((None,1.),(explicit,.95)):
+            with tempfile.TemporaryDirectory() as tmp:
+                p=Path(tmp)
+                with patch('vvcrl.gates.fingerprint',return_value='fixture'),patch('vvcrl.gates.digest',return_value='fixture'):
+                    b=binding(p,dict(encoder='fixture',vanilla='fixture',decoder='fixture'),Profile(),
+                        reward_config=RewardConfig(ONLINE_REWARD),state_version=D4_STATE,ppo_config=supplied)
+                self.assertEqual(b['ppo']['gae_lambda'],wanted)
+                with patch('vvcrl.preflight.binding',side_effect=StopProbe) as bound:
+                    with self.assertRaises(StopProbe):full_preflight(p,p/'gate',{},p,p,state_version=D4_STATE,ppo_config=supplied)
+                    self.assertEqual(bound.call_args.args[5].gae_lambda,wanted)
+                with patch('vvcrl.train.binding',side_effect=StopProbe) as bound:
+                    with self.assertRaises(StopProbe):mini_train(p,p/'train',p/'gate',{},p,p,authorized=True,state_version=D4_STATE,ppo_config=supplied)
+                    self.assertEqual(bound.call_args.args[5].gae_lambda,wanted)
+        from vvcrl.train import save_checkpoint,load_checkpoint
+        from vvcrl.reward import RatePrices
+        with tempfile.TemporaryDirectory() as tmp:
+            old=ActorCritic(D4_STATE);old_ppo=PPO(old,explicit)
+            bind=dict(state_version=D4_STATE,ppo=asdict(explicit),source_sha256='CPU_FIXTURE')
+            path=Path(tmp)/'latest.pt';save_checkpoint(path,old,old_ppo,RatePrices(),0,0,bind,None,43)
+            new=ActorCritic(D4_STATE);before=model_hash(new)
+            with self.assertRaisesRegex(ValueError,'PPO/GAE'):
+                load_checkpoint(path,new,PPO(new),dict(bind,ppo=asdict(resolve_ppo_config(D4_STATE))))
+            self.assertEqual(before,model_hash(new))
+
+    def test_d4_rd_controls_require_budget_before_collection(self):
+        from unittest.mock import patch
+        from vvcrl.diagnose import diagnose
+        with tempfile.TemporaryDirectory() as tmp,patch('vvcrl.diagnose.collect') as native:
+            p=Path(tmp)
+            for mode,budget in (('auto',0),('rd',119),('legacy',120),('compact',120)):
+                with self.assertRaises(ValueError):diagnose(p,p/'out',p/'gate',{},p,p,p/'model',state_version=D4_STATE,mode=mode,max_encodes=budget)
+            self.assertFalse((p/'out').exists());native.assert_not_called()
+
+    def test_d4_rd_controls_use_gt_all_rates_and_never_select(self):
+        from unittest.mock import patch
+        from copy import deepcopy
+        from test_task_utility import GroundTruthRDTests
+        from vvcrl.diagnose import diagnose
+        fixture,pairs=GroundTruthRDTests.rd_rows();lookup={(r['video'],r['result']['rate']):r for r in fixture}
+        cfg=RewardConfig(ONLINE_REWARD)
+        class Catalog:
+            selected={'val':['v0','v1','v2','v3']}
+            def __init__(self,*a,**kw):pass
+        gt={r['video']:{'frames':r['result']['validation_ap']['ground_truth']} for r in fixture}
+        seen=[]
+        def collect(specs):
+            rows=[]
+            for s in specs:
+                self.assertEqual(s['validation_gt'],gt[s['video']]);self.assertEqual(s['split'],'val')
+                row=deepcopy(lookup[(s['video'],s['rate'])]);r=row['result']
+                r.update(utility_version=cfg.utility,task_utility=.6,anchor_task_utility=.8)
+                rows.append(row);seen.append(s)
+            return rows
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)
+            with patch('vvcrl.diagnose.VideoCatalog',Catalog),patch('vvcrl.diagnose.binding',return_value={'validation_selection':VALIDATION_SELECTION}) as bound,patch('vvcrl.diagnose.require_gate'),patch('vvcrl.diagnose.load_checkpoint',return_value={'prices':{'values':{str(r):1. for r in RATES}}}),patch('vvcrl.data.validation_ground_truth',return_value=gt),patch('vvcrl.diagnose.collect',side_effect=collect):
+                report=diagnose(p,p/'out',p/'gate',dict(encoder='fixture',decoder='fixture'),p,p,'fixture.pt',state_version=D4_STATE,reward_config=cfg,max_encodes=120)
+            self.assertEqual(bound.call_args.kwargs['ppo_config'].gae_lambda,1.)
+            self.assertEqual(report['schema'],'vvc-rl-policy-controls/2')
+            self.assertEqual(report['binding']['validation_selection'],VALIDATION_SELECTION)
+            self.assertEqual(len(seen),100);self.assertEqual(set(report['rates']),set(RATES))
+            self.assertFalse(report['checkpoint_selection_performed']);self.assertFalse(report['fixed_control_selection_performed'])
+            self.assertNotIn('development_rate_conditioned_fixed',report)
+            for summary in report['summaries'].values():
+                self.assertTrue(summary['complete']);self.assertFalse(summary['eligible_checkpoint'])
+                self.assertEqual(summary['selection_metric'],VALIDATION_SELECTION)
+                self.assertLess(summary['bd_ap50_95']['bd_rate_percent'],0)
+            self.assertEqual(len(report['ppo_vs_fixed']),4)
+            for compare in report['ppo_vs_fixed'].values():self.assertAlmostEqual(compare['bd_ap50_95']['bd_rate_percent'],0)
+            self.assertTrue((p/'VVC_RL_POLICY_CONTROLS_KAGGLE_SAFE.zip').is_file())
+
+    def test_d4_missing_gt_never_encodes_or_overwrites_completed_report(self):
+        from unittest.mock import patch
+        from vvcrl.diagnose import diagnose
+        class Catalog:
+            selected={'val':['v0','v1','v2','v3']}
+            def __init__(self,*a,**kw):pass
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);previous=p/'VVC_RL_POLICY_CONTROLS_KAGGLE_SAFE.zip';previous.write_bytes(b'KEEP_PREVIOUS')
+            with patch('vvcrl.diagnose.VideoCatalog',Catalog),patch('vvcrl.diagnose.binding',return_value={'validation_selection':VALIDATION_SELECTION}),patch('vvcrl.diagnose.require_gate'),patch('vvcrl.diagnose.load_checkpoint',return_value={}),patch('vvcrl.data.validation_ground_truth',side_effect=FileNotFoundError('Missing real labels')),patch('vvcrl.diagnose.collect') as collect:
+                with self.assertRaises(FileNotFoundError):diagnose(p,p/'out',p/'gate',{},p,p,'fixture.pt',state_version=D4_STATE,max_encodes=120)
+                collect.assert_not_called()
+            self.assertEqual(previous.read_bytes(),b'KEEP_PREVIOUS')
+            self.assertEqual(len(list(p.glob('VVC_RL_POLICY_CONTROLS_FAILED_*_KAGGLE_SAFE.zip'))),1)
+
+    def test_runtime_verifier_ignores_publication_pins_but_checks_source_bytes(self):
+        import subprocess
+        from scripts.verify_notebook import verify_runtime
+        from vvcrl.config import fingerprint
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);(p/'vendor/vvenc').mkdir(parents=True);(p/'vvcrl').mkdir();(p/'notebooks').mkdir()
+            (p/'vendor/vvenc/CMakeLists.txt').write_bytes(b'# fixture\n')
+            source=p/'vvcrl/fixture.py';source.write_bytes(b'pass\n')
+            (p/'notebooks/stale.ipynb').write_bytes(b'{"historical_pin":"old"}\n')
+            def git(*args):subprocess.run(['git','-C',str(p),*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+            git('init','-q','-b','main');git('config','core.autocrlf','false');git('add','.')
+            git('-c','user.name=CPU fixture','-c','user.email=fixture@example.invalid','-c','commit.gpgsign=false','commit','-qm','fixture')
+            expected=fingerprint(p);self.assertEqual(verify_runtime(p,expected),expected)
+            with self.assertRaises(ValueError):verify_runtime(p,'0'*64)
+            extra=p/'vvcrl/untracked.py';extra.write_bytes(b'pass\n')
+            with self.assertRaises(ValueError):verify_runtime(p,expected)
+            extra.unlink();source.write_bytes(b'raise RuntimeError\n')
+            with self.assertRaises(ValueError):verify_runtime(p,expected)

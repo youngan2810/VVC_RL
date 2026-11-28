@@ -92,6 +92,18 @@ class PPOConfig:
             raise ValueError('Invalid PPO optimizer configuration')
         return self
 
+def resolve_ppo_config(state_version=LEGACY_STATE,config=None):
+    """One experiment default for CLI, optimizer, gates and Python entry points.
+
+    PPOConfig() itself retains the historical .95 specification. Omitting a
+    config for D4 selects full-clip credit; an explicit .95 config is preserved
+    as a separate, source/gate/checkpoint-bound controlled experiment.
+    """
+    state_shape(state_version)
+    if config is None:config=PPOConfig(gae_lambda=1. if state_version==D4_STATE else .95)
+    if not isinstance(config,PPOConfig):raise ValueError('Expected a PPOConfig or None')
+    return config.validate()
+
 @dataclass(frozen=True)
 class Profile:
     frames:int=256

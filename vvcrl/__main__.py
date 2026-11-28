@@ -1,6 +1,7 @@
 from pathlib import Path
+from dataclasses import replace
 import argparse,json
-from .config import Profile,RewardConfig,PPOConfig,STATE_SHAPES,LEGACY_STATE,REWARD_VERSIONS,D4_STATE
+from .config import Profile,RewardConfig,PPOConfig,STATE_SHAPES,LEGACY_STATE,REWARD_VERSIONS,resolve_ppo_config
 
 def main():
     p=argparse.ArgumentParser(description='VVC QPA residual PPO; training is opt-in and full-preflight gated')
@@ -13,7 +14,8 @@ def main():
     p.add_argument('--gae-lambda',type=float,default=None,help='D4 defaults to full-clip credit (1.0); historical states to 0.95. Explicit 0.95 remains a controlled comparison.')
     p.add_argument('--state-version',choices=tuple(STATE_SHAPES),default=LEGACY_STATE)
     p.add_argument('--train-schedule',choices=['blocked','mixed'],default='mixed')
-    p.add_argument('--diagnostic-mode',choices=['legacy','compact'],default='legacy')
+    p.add_argument('--diagnostic-mode',choices=['auto','legacy','compact','rd'],default='auto')
+    p.add_argument('--max-diagnostic-encodes',type=int,default=0,help='Explicit upper budget for D4 RD controls, including uncached QPA anchors; zero blocks live RD diagnostics')
     p.add_argument('--resume');p.add_argument('--package');p.add_argument('--start-mini-training',action='store_true');a=p.parse_args()
     if a.command=='export':
         from .artifacts import export_run
@@ -28,8 +30,8 @@ def main():
         from .native_smoke import run_smoke
         print(json.dumps(run_smoke(t,a.output),indent=2));return
     profile=Profile(frames=a.frames).validate();reward_config=RewardConfig(a.reward_version,a.rate_tolerance).validate()
-    selected_lambda=a.gae_lambda if a.gae_lambda is not None else (1. if a.state_version==D4_STATE else .95)
-    ppo_config=PPOConfig(gamma=a.gamma,gae_lambda=selected_lambda).validate()
+    defaults=resolve_ppo_config(a.state_version)
+    ppo_config=replace(defaults,gamma=a.gamma,gae_lambda=defaults.gae_lambda if a.gae_lambda is None else a.gae_lambda).validate()
     if a.command=='preflight':
         from .preflight import full_preflight
         full_preflight(root,a.output,t,a.input,a.tools,profile,seed=a.seed,reward_config=reward_config,ppo_config=ppo_config,train_schedule=a.train_schedule,state_version=a.state_version);return
@@ -37,7 +39,7 @@ def main():
     if a.command=='diagnose':
         if not a.resume:p.error('--resume requires a trained checkpoint')
         from .diagnose import diagnose
-        diagnose(root,a.output,a.preflight,t,a.input,a.tools,a.resume,profile,reward_config=reward_config,ppo_config=ppo_config,train_schedule=a.train_schedule,state_version=a.state_version,mode=a.diagnostic_mode);return
+        diagnose(root,a.output,a.preflight,t,a.input,a.tools,a.resume,profile,reward_config=reward_config,ppo_config=ppo_config,train_schedule=a.train_schedule,state_version=a.state_version,mode=a.diagnostic_mode,max_encodes=a.max_diagnostic_encodes);return
     if not 0<a.hours<=11.75:p.error('--hours must be in (0,11.75]')
     from .train import mini_train
     print(mini_train(root,a.output,a.preflight,t,a.input,a.tools,profile=profile,updates=a.updates,val_every=a.val_every,resume=a.resume,authorized=a.start_mini_training,hours=a.hours,seed=a.seed,reward_config=reward_config,ppo_config=ppo_config,train_schedule=a.train_schedule,state_version=a.state_version))

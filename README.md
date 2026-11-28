@@ -4,6 +4,10 @@
 > control. Reward, state, two-region action and native VVenC are unchanged.
 > Fresh preflight/weights are required. This is a tested learning-mechanism
 > revision, **not evidence that PPO now beats QPA or fixed controls**.
+> Python API and CLI now resolve the same D4 default; explicit .95 remains a
+> controlled alternative. Runtime source verification and notebook-distribution
+> verification have separate, strict scopes. Optional D4 control diagnosis uses
+> real-GT RD and is blocked until an encode budget is explicitly authorized.
 > See [the D-series design and limits](docs/D_SERIES.md).
 
 > Current D4: rerun the updated Stage 1 preflight, then fresh Stage 2 (10 updates). Attach Driving Video with Object Tracking including `mot_labels.parquet`. Old D4 gates/checkpoints cannot resume this RD-selection revision. Actor architecture, reward and native integration are unchanged; PPO now uses the explicit credit mode above, and validation selection is real-label BD-rate/BD-AP, not teacher F1. This is not yet evidence of better compression/task performance.

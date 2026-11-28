@@ -3,7 +3,7 @@ from pathlib import Path
 import json,platform
 import numpy as np
 import torch
-from .config import SCHEMA,TASK,PPOConfig,RewardConfig,atomic_json,canonical,digest,fingerprint,LEGACY_STATE,state_shape,UTILITY_SCHEMA,validate_experiment,D4_STATE,BUDGET_VALUE_SCALE
+from .config import SCHEMA,TASK,PPOConfig,RewardConfig,atomic_json,canonical,digest,fingerprint,LEGACY_STATE,state_shape,UTILITY_SCHEMA,validate_experiment,D4_STATE,BUDGET_VALUE_SCALE,resolve_ppo_config
 from .data import DETECTOR_ID
 
 MANDATORY=('unit_contracts','rgb_protocol','native_noop_parity','all_five_integer_bins','spatial_mapping','actor_to_encoder',
@@ -11,8 +11,9 @@ MANDATORY=('unit_contracts','rgb_protocol','native_noop_parity','all_five_intege
  'logprob_value_replay','actor_head_updated','critic_head_updated','reward_identity','validation_no_update','checkpoint_reload')
 
 def environment():return {'python':platform.python_version(),'torch':str(torch.__version__),'numpy':np.__version__}
-def binding(root,toolchain,profile,workers=2,reward_config=RewardConfig(),ppo_config=PPOConfig(),train_schedule='mixed',state_version=LEGACY_STATE):
-    profile.validate();reward_config.validate();ppo_config.validate();validate_experiment(state_version,reward_config)
+def binding(root,toolchain,profile,workers=2,reward_config=RewardConfig(),ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE):
+    ppo_config=resolve_ppo_config(state_version,ppo_config)
+    profile.validate();reward_config.validate();validate_experiment(state_version,reward_config)
     if state_version==D4_STATE and ppo_config.reward_scale!=BUDGET_VALUE_SCALE:raise ValueError('D4 analytic value requires reward_scale=100')
     if train_schedule not in ('blocked','mixed'):raise ValueError('Unknown training schedule')
     result={'schema':SCHEMA,'task':TASK,'source_sha256':fingerprint(root),'profile':asdict(profile),'ppo':asdict(ppo_config),'train_schedule':train_schedule,'reward':asdict(reward_config),'detector':DETECTOR_ID,

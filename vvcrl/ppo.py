@@ -2,7 +2,7 @@ from dataclasses import asdict
 from pathlib import Path
 import numpy as np
 import torch
-from .config import PPOConfig,D_STATES,ISOLATED_STATES,REGION_STATES,D4_STATE,BUDGET_VALUE_SCALE
+from .config import PPOConfig,D_STATES,ISOLATED_STATES,REGION_STATES,D4_STATE,BUDGET_VALUE_SCALE,resolve_ppo_config
 
 def gae(rewards,values,terminated,gamma=1.,lam=.95,last_value=0.):
     r=np.asarray(rewards,np.float32);v=np.asarray(values,np.float32);d=np.asarray(terminated,bool)
@@ -125,8 +125,8 @@ def residual_mechanics_ok(model,stats):
     return True
 
 class PPO:
-    def __init__(self,model,config=PPOConfig()):
-        config.validate();self.model,self.config=model,config
+    def __init__(self,model,config=None):
+        config=resolve_ppo_config(model.state_version,config);self.model,self.config=model,config
         if model.state_version==D4_STATE and config.reward_scale!=BUDGET_VALUE_SCALE:raise ValueError('D4 analytic value requires reward_scale=100')
         self.isolated=model.state_version in ISOLATED_STATES
         if model.state_version in D_STATES:
