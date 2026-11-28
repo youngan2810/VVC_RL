@@ -1,8 +1,20 @@
+> Current D4 experiment: supervised **Train GT AP50:95 task reward**, with full-clip credit (gamma=lambda=1), unchanged bitrate cap and native QPA integration. Train labels never enter Actor/state. Validation selects by real-GT BD-rate/BD-AP; Test never selects. This changes the training method from the historical teacher-only proxy; it is not a label-free paper reproduction.
+>
+> Use the newly pinned D-Series Stage 1, then fresh Stage 2 weights. Old proxy gates/checkpoints are incompatible. CPU tests establish accounting/learning mechanics, **not that PPO now beats QPA or fixed controls**. See [method, evidence and limits](docs/D_SERIES.md).
+
 # VVC_RL — task-aware residual QP control over native VVenC QPA
 
 This is a new research implementation, not a resume of the earlier Gaussian/PPO or D3QN experiments. QPA and rate control remain active. The learned policy selects an integer residual per CTU to preserve object-detection information under a bitrate budget. Only QP control is implemented; Partition, MTS and other machine tasks are future work.
 
-## Research design
+## Current D4 experiment
+
+On `research/d-series-adaptive-policy`, use [D-Series Preflight](notebooks/VVC_RL_D_Series_01_Preflight_Kaggle.ipynb), then [Train 10 updates](notebooks/VVC_RL_D_Series_02_Train10_Kaggle.ipynb). Review the first 10 updates before using [Resume to 40](notebooks/VVC_RL_D_Series_03_Resume30_Kaggle.ipynb). These launchers default to **D4**, pin an immutable functional commit and fingerprint, and require a fresh same-source gate. Historical B/V2 launchers below remain pinned controls.
+
+D4 preserves D3's 11 spatial / 20 global state, two ROI/background categoricals, native encoder, Critic-only auxiliary and 2% cap. The critic adds the known causal budget-refund potential analytically; the neural value target excludes it. The task objective is now clip GT AP50:95 minus paired QPA clip GT AP50:95, delivered at the final coding step. Budget shaping and terminal excess cost remain unchanged; no spare-bit bonus. Actor probabilities are not forced to change. See [D-series method, evidence and limits](docs/D_SERIES.md). D3 checkpoints cannot resume D4 even though weight shapes coincide. Start fresh; unchanged legacy methods remain available for controlled comparisons.
+
+Stage 1 needs the locked BDD100K MOV dataset plus authenticated `mot_labels.parquet`; it checks all 16 Train and 4 Val label coverages before native builds and requires 19 gate checks. Stage 2 additionally needs the **new D4** preflight SAFE and its exact toolchain bundle. Stage 3 also needs the completed D4 Stage 2 SAFE. Kaggle-expanded outer SAFE payloads and toolchain directories are supported. Do not manually unpack `VVC_RL_payload.bin`. CPU tests/replay do not prove detection improvement; native two-GPU preflight and matched validation remain mandatory.
+
+## Historical B/V2 research design
 
 - PPO-Clip + GAE; two learned categorical factors per coded picture (source-ROI / background), each in `{-2,-1,0,1,2}`, mapped to the existing 12 integer CTU residuals. QPA still supplies the detailed base QPs. Neither region is forced to receive a particular sign or nonzero action.
 - Native 480×320, 30 fps, CTU128, QPA enabled, medium preset, GOP32, one-pass RC, serial coded pictures. Two independent GPU detector/encoder collectors; PPO itself runs on CPU.
@@ -51,7 +63,7 @@ Per-update `updates/000001_signals.npz` (and subsequent numbers) preserves raw p
 
 Additional `--updates` means additional complete two-clip PPO updates, not episodes or epochs. The schedule rotates all 16 train videos × 5 rates; a short run is not a complete schedule. Windows encoder builds use `scripts/build_native.py` with MinGW; the complete real-data preflight requires Linux/CUDA.
 
-`python -m vvcrl diagnose` provides validation-only paired PPO/random/fixed−2/fixed+2/no-op/ROI-protect/ROI-redistribute comparisons at 120 kbps. Pass the same toolchain/preflight and trained checkpoint using `--resume`. It does not optimize on validation and is not a BD-rate study. Mini training records validation at 50/120/200 kbps and retains a best checkpoint only for a positive macro task gain, complete unique validation pairs and every clip satisfying the same bitrate cap used by reward. It logs task/bitrate reward components, requested/effective actions, entropy, budget feasibility and per-clip quality regressions. No Test data changes prices or policy. If no checkpoint qualifies, there is no claimed best model.
+`python -m vvcrl diagnose` provides validation-only paired PPO/random/fixed−2/fixed+2/no-op/ROI-protect/ROI-redistribute comparisons at 120 kbps. Pass the same toolchain/preflight and trained checkpoint using `--resume`. It does not optimize on validation and is not a BD-rate study. Historical mini variants use teacher-F1 validation at 50/120/200 kbps. **Current D4 uses real-GT car AP on four Validation videos at all five rates, selecting the lowest valid BD-rate AP50:95 vs QPA with positive BD-AP50:95 and all 20 pairs within the unchanged bitrate cap.** Undefined RD metrics never fall back to F1. See [the exact D4 selection protocol](docs/D_SERIES.md#checkpoint-selection-d4-current-source-only). It logs task/bitrate reward components, requested/effective actions, entropy, budget feasibility and per-clip quality regressions. No Test data changes prices or policy. If no checkpoint qualifies, there is no claimed best model.
 
 SAFE exports preserve the payload as `.bin` inside a ZIP and contain checkpoints, policy logits/actions, rollout arrays, bitstreams, QP/lambda traces, source/decoded detector boxes, metrics and hashes. Raw source/reconstructed video is excluded after decode parity is verified. Keep the whole SAFE archive. `python -m vvcrl import --package ... --output ...` validates it before extracting into an empty directory. Export commands use `--output` as the existing run folder.
 
@@ -68,3 +80,8 @@ See [docs/VERIFICATION.json](docs/VERIFICATION.json) for actual local checks. Lo
 ## Source and licensing
 
 `vendor/vvenc` includes the full VVenC source at `1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f` with the narrow native integration. `native/originals` and `native/online_manifest.json` preserve the original/modified hashes. Vanilla baseline is restored from those originals; old CTU32 or unrelated binary results must not be substituted. External decoder/detector versions and weights are pinned separately. See [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) and preserved upstream licenses. No models, credentials, videos or historical results are published.
+
+
+## D-series research variants
+
+See [D-series design and controlled training protocol](docs/D_SERIES.md). Existing historical notebooks remain pinned; select D-series explicitly via CLI and run a new full preflight.

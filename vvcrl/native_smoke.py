@@ -3,9 +3,10 @@ from pathlib import Path
 import os,subprocess
 import numpy as np
 import torch
-from .config import Profile,FB,W,H,atomic_json,digest
+from .config import Profile,FB,W,H,atomic_json,digest,LEGACY_STATE,FEEDBACK_STATE,RewardConfig,D1_STATE,D2_STATE,D3_STATE,COMBINED_REWARD,ONLINE_REWARD
 from .episode import run_episode
-from .model import ActorCritic
+from .model import ActorCritic,model_hash
+from .ppo import PPO
 from .controls import roi_action
 
 class FixtureDetector:
@@ -25,11 +26,12 @@ def fixture(path,frames=32):
     return boxes
 
 def run_smoke(toolchain,output):
+    torch.set_num_threads(1)
     root=Path(output);root.mkdir(parents=True,exist_ok=False);source=root/'fixture.yuv';boxes=fixture(source);detector=FixtureDetector();profile=Profile(frames=32)
     identity={'name':'SYNTHETIC_BRIGHTNESS_FIXTURE_NOT_YOLO'};results={}
-    def case(name,fixed=None,model=None,anchor=None):
+    def case(name,fixed=None,model=None,anchor=None,state_version=LEGACY_STATE,reward_config=RewardConfig()):
         r,b=run_episode(encoder=toolchain['encoder'],decoder=toolchain['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=identity,
-          profile=profile,rate=120,folder=root/name,model=model,fixed=fixed,anchor=anchor,deterministic=True,split='train')
+          profile=profile,rate=120,folder=root/name,model=model,fixed=fixed,anchor=anchor,deterministic=True,split='train',state_version=state_version,reward_config=reward_config)
         results[name]=r;return r,b
     anchor,_=case('noop')
     env=os.environ.copy()
@@ -55,6 +57,38 @@ def run_smoke(toolchain,output):
     with torch.no_grad():probe.actor.bias.zero_();probe.actor.bias[[0,8]]=10
     r,_=case('actor_forced_roi',model=probe,anchor=anchor)
     if r['bitstream_sha256']!=roi['bitstream_sha256']:raise ValueError('Semantic factors do not reproduce ROI -2 / background +1')
+    # C1 is observation only: the same forced action must produce the same stream.
+    feedback_model=ActorCritic(FEEDBACK_STATE).eval()
+    with torch.no_grad():feedback_model.actor.weight.zero_();feedback_model.actor.bias.zero_();feedback_model.actor.bias[[3,8]]=10
+    r,b=case('feedback_forced_plus1',model=feedback_model,anchor=anchor,state_version=FEEDBACK_STATE)
+    if r['bitstream_sha256']!=results['fixed_1']['bitstream_sha256'] or b['x'].shape[1]!=11 or not np.any(b['x'][1:,8]):raise ValueError('C1 observation/bitstream parity failed')
+    if np.any(b['x'][0,8:]) or np.any(b['g'][0,15:]):raise ValueError('C1 feedback leaked into initial state')
+    progressive,_=case('progressive_fixed_plus1',fixed=lambda obs:np.ones(12,int),anchor=anchor,reward_config=RewardConfig('task-budget-v3-progressive'))
+    if progressive['bitstream_sha256']!=results['fixed_1']['bitstream_sha256'] or abs(progressive['raw_return']-results['fixed_1']['raw_return'])>1e-10:raise ValueError('C2 reward/bitstream identity failed')
+    for name,version in (('soft_iou_fixed_plus1','task-budget-v2-soft-iou'),('combined_fixed_plus1','task-budget-v3-progressive-soft-iou')):
+        soft,_=case(name,fixed=lambda obs:np.ones(12,int),anchor=anchor,reward_config=RewardConfig(version))
+        if soft['bitstream_sha256']!=results['fixed_1']['bitstream_sha256'] or soft['task_retention_f1_v2']!=results['fixed_1']['task_retention_f1_v2'] or soft['reward_identity_error']>1e-10:raise ValueError('C3 soft utility changed native stream or legacy F1')
+    # One synthetic real-codec mechanical PPO update with all three changes.
+    # This is not useful learning or a real-data training gate.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(721);mechanical=ActorCritic(FEEDBACK_STATE)
+        result,batch=run_episode(encoder=toolchain['encoder'],decoder=toolchain['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=identity,
+          profile=profile,rate=120,folder=root/'combined_ppo_mechanics',model=mechanical,anchor=anchor,split='train',state_version=FEEDBACK_STATE,reward_config=RewardConfig('task-budget-v3-progressive-soft-iou'))
+        before=model_hash(mechanical);optimizer=PPO(mechanical);stats=optimizer.update(batch)
+        if model_hash(mechanical)==before or stats['actor_head_change']<=0 or stats['critic_head_change']<=0 or stats['policy_head_gradient_norm']<=0:raise ValueError('Combined native PPO mechanics failed')
+        results['combined_ppo_mechanics']=result
+        atomic_json(root/'COMBINED_PPO_MECHANICS.json',{'training_ready':False,'synthetic_only':True,'stats':stats})
+        print('COMBINED_PPO_MECHANICS',stats,flush=True)
+    for version in (D1_STATE,D2_STATE,D3_STATE):
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(721);m=ActorCritic(version)
+            cfg=RewardConfig(ONLINE_REWARD if version==D3_STATE else COMBINED_REWARD)
+            result,batch=run_episode(encoder=toolchain['encoder'],decoder=toolchain['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=identity,
+                profile=profile,rate=120,folder=root/version,model=m,anchor=anchor,split='train',state_version=version,reward_config=cfg)
+            before=model_hash(m);stats=PPO(m).update(batch)
+            if model_hash(m)==before or stats['actor_head_change']<=0 or stats['critic_head_change']<=0:raise ValueError('D-series native PPO mechanics failed: '+version)
+            results[version]=result
+            atomic_json(root/version/'MECHANICS_ONLY.json',{'training_ready':False,'synthetic_only':True,'stats':stats})
     summary={'status':'PASS_NATIVE_MECHANICS_ONLY','synthetic_only':True,'training_ready':False,
       'checks':{'native_noop_parity':True,'all_five_integer_bins':True,'spatial_mapping':True,'actor_to_encoder':True,'au_bit_accounting':True,'independent_decode':True,'live_state_causality':True},
       'cases':{n:{k:r[k] for k in ('bits','actual_kbps','psnr_y_10bit','bitstream_sha256','decoder_native_parity','action_audit')} for n,r in results.items()}}

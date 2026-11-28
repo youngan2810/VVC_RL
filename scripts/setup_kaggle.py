@@ -23,7 +23,7 @@ def setup(tools,jobs=2):
     subprocess.run(['apt-get','update','-qq'],check=True)
     subprocess.run(['apt-get','install','-y','-qq','cmake','g++','ffmpeg','pkg-config','libswscale-dev','libavutil-dev'],check=True)
     # Preserve Kaggle PyTorch/CUDA. Install detector dependencies before workers start.
-    subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check','setuptools==80.9.0','gitpython==3.1.45','requests','PyYAML','pandas','seaborn','scipy','pillow','tqdm','psutil','opencv-python-headless'],check=True)
+    subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check','setuptools==80.9.0','gitpython==3.1.45','requests','PyYAML','pandas','pyarrow','pycocotools==2.0.11','seaborn','scipy','pillow','tqdm','psutil','opencv-python-headless'],check=True)
     binaries=build(jobs)
     decoder=tools/'vvdec';pinned_repo('https://github.com/fraunhoferhhi/vvdec.git',decoder,DECODER)
     run(['cmake','-S',decoder,'-B',decoder/'build','-DCMAKE_BUILD_TYPE=Release'],tools/'decoder_configure.log')
