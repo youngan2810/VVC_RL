@@ -3,7 +3,7 @@ from pathlib import Path
 import os,subprocess
 import numpy as np
 import torch
-from .config import Profile,FB,W,H,atomic_json,digest,LEGACY_STATE,FEEDBACK_STATE,RewardConfig
+from .config import Profile,FB,W,H,atomic_json,digest,LEGACY_STATE,FEEDBACK_STATE,RewardConfig,D1_STATE,D2_STATE,D3_STATE,COMBINED_REWARD,ONLINE_REWARD
 from .episode import run_episode
 from .model import ActorCritic,model_hash
 from .ppo import PPO
@@ -79,6 +79,16 @@ def run_smoke(toolchain,output):
         results['combined_ppo_mechanics']=result
         atomic_json(root/'COMBINED_PPO_MECHANICS.json',{'training_ready':False,'synthetic_only':True,'stats':stats})
         print('COMBINED_PPO_MECHANICS',stats,flush=True)
+    for version in (D1_STATE,D2_STATE,D3_STATE):
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(721);m=ActorCritic(version)
+            cfg=RewardConfig(ONLINE_REWARD if version==D3_STATE else COMBINED_REWARD)
+            result,batch=run_episode(encoder=toolchain['encoder'],decoder=toolchain['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=identity,
+                profile=profile,rate=120,folder=root/version,model=m,anchor=anchor,split='train',state_version=version,reward_config=cfg)
+            before=model_hash(m);stats=PPO(m).update(batch)
+            if model_hash(m)==before or stats['actor_head_change']<=0 or stats['critic_head_change']<=0:raise ValueError('D-series native PPO mechanics failed: '+version)
+            results[version]=result
+            atomic_json(root/version/'MECHANICS_ONLY.json',{'training_ready':False,'synthetic_only':True,'stats':stats})
     summary={'status':'PASS_NATIVE_MECHANICS_ONLY','synthetic_only':True,'training_ready':False,
       'checks':{'native_noop_parity':True,'all_five_integer_bins':True,'spatial_mapping':True,'actor_to_encoder':True,'au_bit_accounting':True,'independent_decode':True,'live_state_causality':True},
       'cases':{n:{k:r[k] for k in ('bits','actual_kbps','psnr_y_10bit','bitstream_sha256','decoder_native_parity','action_audit')} for n,r in results.items()}}

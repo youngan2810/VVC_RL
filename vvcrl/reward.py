@@ -20,7 +20,9 @@ def reward(score,anchor_score,bits,anchor_bits,frames,budget,price,scale=100.,*,
     config.validate()
     if not np.isfinite([score,anchor_score,bits,anchor_bits,frames,budget,price,scale]).all() or frames<=0 or int(frames)!=frames or min(budget,bits,anchor_bits,scale)<=0 or price<0 or not 0<=score<=1 or not 0<=anchor_score<=1:
         raise ValueError('Invalid reward accounting')
-    quality=(score-anchor_score)/frames
+    if config.gt_ap and not terminal and (score!=0 or anchor_score!=0):
+        raise ValueError('GT AP task reward is terminal only; never average per-frame AP')
+    quality=(score-anchor_score) if config.gt_ap else (score-anchor_score)/frames
     if config.progressive:
         if progress is None or total_bits is None:raise ValueError('Progressive reward requires causal budget context')
         previous_cap,cap=progress['previous_cap_bits'],progress['cumulative_cap_bits']
@@ -43,6 +45,12 @@ def reward(score,anchor_score,bits,anchor_bits,frames,budget,price,scale=100.,*,
     if config.progressive:result.update(progress,previous_excess_bits=previous_excess,excess_bits=excess,price=float(price))
     return result
 
+def online_cap(budget,step,frames,config):
+    """Causal cumulative target cap; step counts completed coding pictures."""
+    if not np.isfinite(budget) or budget<=0 or type(step) is not int or not 0<=step<=frames or frames<=0:
+        raise ValueError('Invalid online budget position')
+    return float(budget*(1+config.rate_tolerance)*step/frames)
+
 class ProgressiveBudget:
     """Predetermined coding-order anchor schedule; telescoping clip excess.
 
@@ -56,9 +64,16 @@ class ProgressiveBudget:
         if anchor is None:
             self.anchor_bits=None;self.fractions=np.arange(1,self.frames+1,dtype=np.float64)/self.frames
         else:
-            self.anchor_bits=anchor['bits'];rows=anchor['by_poc'];self.order=tuple(int(p) for p in rows)
+            self.anchor_bits=anchor['bits'];rows=anchor['by_poc']
+            explicit=anchor.get('coding_order')
+            if explicit is not None:
+                if not isinstance(explicit,list) or any(type(p) is not int for p in explicit):raise ValueError('Invalid explicit coding order')
+                self.order=tuple(explicit)
+            elif config.online:raise ValueError('Online reward requires explicit anchor coding order')
+            else:self.order=tuple(int(p) for p in rows) # historical compatibility only
             if len(self.order)!=self.frames or set(self.order)!=set(range(self.frames)):raise ValueError('Invalid anchor coding-order schedule')
-            bits=np.asarray([row['bits'] for row in rows.values()],np.float64)
+            if set(rows)!=set(map(str,self.order)):raise ValueError('Anchor coding order/POC keys differ')
+            bits=np.asarray([rows[str(p)]['bits'] for p in self.order],np.float64)
             if not np.isfinite(bits).all() or (bits<=0).any() or (bits!=np.floor(bits)).any() or bits.sum()!=self.anchor_bits:raise ValueError('Anchor AU accounting mismatch')
             self.fractions=np.cumsum(bits)/self.anchor_bits
     def step(self,poc,bits,total_bits):
@@ -66,7 +81,10 @@ class ProgressiveBudget:
         if self.order is not None and self.order[self.k]!=poc:raise ValueError('Anchor and rollout coding order differ')
         terminal=self.k==self.frames-1
         reference=self.anchor_bits if self.anchor_bits is not None else (total_bits if terminal else self.budget)
-        cap=bitrate_cap(self.budget,reference,self.config)*float(self.fractions[self.k])
+        if self.config.online and not terminal:
+            cap=online_cap(self.budget,self.k+1,self.frames,self.config)
+        else:
+            cap=bitrate_cap(self.budget,reference,self.config)*float(self.fractions[self.k])
         context={'budget_step':self.k,'previous_bits':self.used,'cumulative_bits':int(total_bits),'previous_cap_bits':self.previous_cap,'cumulative_cap_bits':cap}
         self.k+=1;self.used=int(total_bits);self.previous_cap=cap
         return context

@@ -34,3 +34,96 @@ def summary(frames):
       'micro_f1':2*tp/(2*tp+fp+fn) if 2*tp+fp+fn else 1.,'tp':tp,'fp':fp,'fn':fn}
     if all('matched_iou_f1_v1' in x for x in frames):result['matched_iou_f1_v1']=float(np.mean([x['matched_iou_f1_v1'] for x in frames]))
     return result
+
+
+# Ground-truth Validation metrics are separate from teacher reward metrics.
+import contextlib,io
+from scipy.interpolate import PchipInterpolator
+
+def coco_ap(frames, predictions):
+    """Pool confidence-ranked detections over frames, never average frame AP.
+
+    frames: [{image_id, boxes:[[x1,y1,x2,y2],...]}].
+    predictions: [{image_id, boxes:[[x1,y1,x2,y2,score],...]}].
+    COCO IoU .50:.05:.95, 101 recall thresholds, area all, maxDets 300.
+    """
+    from pycocotools.coco import COCO
+    from pycocotools.cocoeval import COCOeval
+    if not frames:raise ValueError("Missing annotated frames")
+    ids = [int(x['image_id']) for x in frames]
+    if len(ids) != len(set(ids)):
+        raise ValueError('Duplicate evaluation image IDs')
+    if sorted(ids) != sorted(int(x['image_id']) for x in predictions):
+        raise ValueError('Predictions must cover exactly the evaluated frames')
+    anns, dets = [], []
+    for frame in frames:
+        for box in frame['boxes']:
+            x1,y1,x2,y2=map(float,box)
+            if not np.isfinite(box).all() or x2<=x1 or y2<=y1:
+                raise ValueError('Invalid ground truth box')
+            anns.append(dict(id=len(anns)+1,image_id=int(frame['image_id']),category_id=1,
+                             bbox=[x1,y1,x2-x1,y2-y1],area=(x2-x1)*(y2-y1),iscrowd=0))
+    if not anns:
+        return dict(ap50=None,ap50_95=None,images=len(ids),gt_boxes=0,reason='no_car_ground_truth')
+    for frame in predictions:
+        for box in frame['boxes']:
+            x1,y1,x2,y2,score=map(float,box)
+            if not np.isfinite(box).all() or x2<=x1 or y2<=y1 or not 0<=score<=1:
+                raise ValueError('Invalid prediction box')
+            dets.append(dict(image_id=int(frame['image_id']),category_id=1,
+                             bbox=[x1,y1,x2-x1,y2-y1],score=score))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gt=COCO()
+        gt.dataset=dict(info={},images=[dict(id=i,width=480,height=320) for i in ids],
+                        annotations=anns,categories=[dict(id=1,name='car')])
+        gt.createIndex()
+        if dets:
+            dt=gt.loadRes(dets)
+        else:
+            dt=COCO();dt.dataset=dict(info={},images=gt.dataset['images'],annotations=[],
+                                     categories=gt.dataset['categories']);dt.createIndex()
+        ev=COCOeval(gt,dt,'bbox')
+        ev.params.imgIds=ids;ev.params.catIds=[1];ev.params.maxDets=[1,10,300]
+        ev.evaluate();ev.accumulate()
+    precision=ev.eval['precision'][:,:,0,0,-1]
+    valid=precision[precision>=0]
+    at50=precision[0];at50=at50[at50>=0]
+    return dict(ap50=float(at50.mean()) if len(at50) else None,
+                ap50_95=float(valid.mean()) if len(valid) else None,
+                images=len(ids),gt_boxes=len(anns),detections=len(dets))
+
+
+def frontier(points):
+    """Deterministic Pareto frontier, with duplicate rates merged before pruning."""
+    rates={}
+    for rate,quality in points:
+        if quality is None:continue
+        rate,quality=float(rate),float(quality)
+        if not np.isfinite([rate,quality]).all() or rate<=0 or not 0<=quality<=1:
+            raise ValueError('Invalid RD point')
+        rates[rate]=max(quality,rates.get(rate,-1.))
+    out=[]
+    for rate,quality in sorted(rates.items()):
+        if not out or quality>out[-1][1]+1e-12:out.append((rate,quality))
+    return out
+
+
+def bd_metrics(anchor, test):
+    a,b=frontier(anchor),frontier(test)
+    result=dict(bd_rate_percent=None,bd_ap_pp=None,anchor_frontier=len(a),test_frontier=len(b))
+    if min(len(a),len(b))<2:return dict(result,reason='insufficient_monotone_frontier')
+    ar,aq=np.asarray(a).T;br,bq=np.asarray(b).T
+    lo,hi=max(aq[0],bq[0]),min(aq[-1],bq[-1])
+    result['ap_overlap_pp']=float(max(0.,hi-lo)*100)
+    if hi>lo+1e-12:
+        ai=PchipInterpolator(aq,np.log(ar),extrapolate=False)
+        bi=PchipInterpolator(bq,np.log(br),extrapolate=False)
+        delta=(bi.integrate(lo,hi)-ai.integrate(lo,hi))/(hi-lo)
+        result['bd_rate_percent']=float(np.expm1(delta)*100)
+    lo,hi=max(np.log(ar[0]),np.log(br[0])),min(np.log(ar[-1]),np.log(br[-1]))
+    if hi>lo+1e-12:
+        ai=PchipInterpolator(np.log(ar),aq,extrapolate=False)
+        bi=PchipInterpolator(np.log(br),bq,extrapolate=False)
+        result['bd_ap_pp']=float((bi.integrate(lo,hi)-ai.integrate(lo,hi))/(hi-lo)*100)
+    result['reason']='ok' if result['bd_rate_percent'] is not None else 'no_common_ap_range'
+    return result

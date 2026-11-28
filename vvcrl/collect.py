@@ -4,28 +4,37 @@ from pathlib import Path
 import hashlib,json,multiprocessing as mp,os,time
 import numpy as np
 import torch
-from .config import Profile,RewardConfig,atomic_json,canonical,digest,LEGACY_STATE,UTILITY_SCHEMA,state_shape,NY,NX
+from .config import Profile,RewardConfig,atomic_json,canonical,digest,LEGACY_STATE,UTILITY_SCHEMA,state_shape,NY,NX,TRAINING_REWARD_PROTOCOL,VALIDATION_SELECTION
 from .model import ActorCritic,model_hash
 from .data import DETECTOR_ID,open_detector,prepared_clip
 from .episode import run_episode,verified_result,cache_identity
 from .controls import roi_action,roi_pair_action
 
 def anchor_episode(spec,detector,source,boxes,profile):
-    key=hashlib.sha256(canonical({'video':spec['video'],'split':spec['split'],'decoder':digest(spec['decoder']),'pixel':digest(source),'teacher_sha256':hashlib.sha256(canonical(boxes).encode()).hexdigest(),'frames':profile.frames,'rate':spec['rate'],'encoder':digest(spec['encoder']),'detector':DETECTOR_ID,'profile':asdict(profile),'task':'task_retention_f1_v2','utility_schema':UTILITY_SCHEMA,'reward':spec.get('reward_config',{}),'reward_scale':spec.get('reward_scale',100.)}).encode()).hexdigest()
+    key=hashlib.sha256(canonical({'video':spec['video'],'split':spec['split'],'decoder':digest(spec['decoder']),'pixel':digest(source),'teacher_sha256':hashlib.sha256(canonical(boxes).encode()).hexdigest(),'frames':profile.frames,'rate':spec['rate'],'encoder':digest(spec['encoder']),'detector':DETECTOR_ID,'profile':asdict(profile),'task':'task_retention_f1_v2','utility_schema':UTILITY_SCHEMA,'reward':spec.get('reward_config',{}),'reward_scale':spec.get('reward_scale',100.),'validation_gt':spec.get('validation_gt'),'training_gt':spec.get('training_gt')}).encode()).hexdigest()
     base=Path(spec['output'])/'anchors'/key;base.mkdir(parents=True,exist_ok=True)
     for p in sorted(base.glob('attempt*')):
         r=verified_result(p)
         if r is not None:
-            if r['split']!=spec['split'] or r['reward_config']!=asdict(RewardConfig(**spec.get('reward_config',{}))) or r['reward_scale']!=spec.get('reward_scale',100.) or r['identity']!=cache_identity(source,profile,spec['rate'],spec['encoder'],DETECTOR_ID,boxes):raise ValueError('Anchor cache contract mismatch')
+            if r['split']!=spec['split'] or r['reward_config']!=asdict(RewardConfig(**spec.get('reward_config',{}))) or r['reward_scale']!=spec.get('reward_scale',100.) or r['identity']!=cache_identity(source,profile,spec['rate'],spec['encoder'],DETECTOR_ID,boxes,RewardConfig(**spec.get('reward_config',{}))):raise ValueError('Anchor cache contract mismatch')
             if r['model_sha256'] is not None or r['requested_action_distribution'].get('0')!=1. or r['anchor_bits']!=r['bits'] or r['anchor_quality']!=r['task_retention_f1_v2']:raise ValueError('Cached anchor is not a verified no-op')
+            for name,ap_key in (('validation_gt','validation_ap'),('training_gt','training_ap')):
+                if spec.get(name) is None:continue
+                gt=spec[name];ap=r.get(ap_key,{})
+                if ap.get('gt_sha256')!=gt['gt_sha256'] or ap.get('protocol')!=gt['protocol'] or ap.get('ground_truth')!=gt['frames']:
+                    raise ValueError('Cached anchor lacks exact split-specific GT/AP')
             return r
     folder=base/f'attempt{len(list(base.glob("attempt*"))):03}'
     r,_=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
-      profile=profile,rate=spec['rate'],folder=folder,split=spec['split'],deterministic=True,reward_config=RewardConfig(**spec.get('reward_config',{})),reward_scale=spec.get('reward_scale',100.))
+      profile=profile,rate=spec['rate'],folder=folder,split=spec['split'],deterministic=True,reward_config=RewardConfig(**spec.get('reward_config',{})),reward_scale=spec.get('reward_scale',100.),validation_gt=spec.get('validation_gt'),training_gt=spec.get('training_gt'))
     return r
 
 def _worker(spec):
     torch.set_num_threads(1);torch.manual_seed(spec['seed']);np.random.seed(spec['seed']%(2**32))
+    for name,split in (('training_gt','train'),('validation_gt','val')):
+        gt=spec.get(name)
+        if gt is not None and (spec['split']!=split or {f['video_id'] for f in gt['frames']}!={spec['video']}):
+            raise ValueError('Collector GT split/video mismatch')
     version=spec.get('state_version',LEGACY_STATE)
     checkpoint=torch.load(spec['snapshot'],map_location='cpu',weights_only=True)
     if checkpoint.get('state_version',checkpoint.get('binding',{}).get('state_version',LEGACY_STATE))!=version:raise ValueError('Collector state schema mismatch')
@@ -50,7 +59,7 @@ def _worker(spec):
             fixed=lambda obs:roi_pair_action(boxes[obs['poc']],rd,bd);policy=None
         elif control!='ppo':raise ValueError('Unknown diagnostic control')
         result,batch=run_episode(encoder=spec['encoder'],decoder=spec['decoder'],source=source,boxes=boxes,detector=detector,detector_identity=DETECTOR_ID,
-          profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'],reward_config=RewardConfig(**spec.get('reward_config',{})),state_version=version,reward_scale=spec.get('reward_scale',100.))
+          profile=profile,rate=spec['rate'],folder=folder,model=policy,fixed=fixed,anchor=anchor,price=spec['price'],deterministic=spec['split']!='train',split=spec['split'],reward_config=RewardConfig(**spec.get('reward_config',{})),state_version=version,reward_scale=spec.get('reward_scale',100.),validation_gt=spec.get('validation_gt'),training_gt=spec.get('training_gt'))
         cache_meta=json.loads((cache/key/'cache.json').read_text())
         atomic_json(folder/'collector.json',{'video':spec['video'],'split':spec['split'],'device':spec['device'],'model_sha256':model_hash(model),'input_cache_key':key,'seed':spec['seed'],
           'control':control,'source_stage_timing':cache_meta.get('timing'),'state_version':version,'reward_config':result['reward_config'],'reward_scale':result['reward_scale']})
@@ -81,6 +90,14 @@ def load_batches(results,*,expected_split=None,state_version=None,reward_config=
         if reward_config is not None and cfg!=asdict(reward_config):raise ValueError('Rollout reward binding mismatch')
         if reward_scale is not None and scale!=reward_scale:raise ValueError('Rollout reward scale mismatch')
         if expected_model is not None and proof['model_sha256']!=expected_model:raise ValueError('Rollout is not from the current policy')
+        if RewardConfig(**cfg).gt_ap:
+            key='training_ap' if proof['split']=='train' else 'validation_ap'
+            expected_protocol=TRAINING_REWARD_PROTOCOL if proof['split']=='train' else VALIDATION_SELECTION
+            ap=proof.get(key);base=proof.get('anchor_'+key)
+            if ap is None or base is None or ap['protocol']!=expected_protocol or base['protocol']!=expected_protocol:
+                raise ValueError('GT reward rollout lacks same-split AP evidence')
+            if any(ap[k]!=base[k] for k in ('gt_sha256','ground_truth')) or proof['task_utility']!=ap['metrics']['ap50_95'] or proof['anchor_task_utility']!=base['metrics']['ap50_95']:
+                raise ValueError('GT reward rollout objective/labels mismatch')
         contracts.append((proof['split'],version,canonical(cfg),scale,proof['model_sha256']))
         with np.load(Path(r['folder'])/'rollout.npz',allow_pickle=False) as z:record={k:z[k].copy() for k in z.files}
         if expected_split is not None and proof.get('deterministic',expected_split=='val')!=(expected_split=='val'):raise ValueError('Rollout sampling mode differs from split')
