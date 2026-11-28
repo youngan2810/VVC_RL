@@ -1,6 +1,6 @@
 import math
 import numpy as np
-from .config import W,H,CTU,NX,NY,FB,LEGACY_STATE,FEEDBACK_STATE,state_shape,uses_feedback,ONLINE_STATES,RewardConfig,ONLINE_REWARD
+from .config import W,H,CTU,NX,NY,FB,LEGACY_STATE,FEEDBACK_STATE,state_shape,uses_feedback,ONLINE_STATES,RewardConfig,ONLINE_REWARD,resolve_reward_config
 from .locked.method import boxes_checked
 from .reward import online_cap
 
@@ -11,7 +11,7 @@ def pool(image):
 class StateBuilder:
     def __init__(self,source,boxes,frames,rate,price,state_version=LEGACY_STATE,reward_config=None):
         self.state_version=state_version;state_shape(state_version)
-        self.reward_config=reward_config or RewardConfig(ONLINE_REWARD if state_version in ONLINE_STATES else 'task-budget-v2')
+        self.reward_config=reward_config or resolve_reward_config(state_version)
         self.reward_config.validate()
         if state_version in ONLINE_STATES and not self.reward_config.online:raise ValueError('Online state requires online budget reward')
         self.previous_qp=np.zeros((NY,NX),np.float32);self.previous_response=np.zeros_like(self.previous_qp)

@@ -2,18 +2,20 @@ from dataclasses import asdict
 from pathlib import Path
 import hashlib,json,time,shutil,gzip
 import numpy as np
-from .config import FB,W,H,DELTAS,TASK,RewardConfig,atomic_json,digest,canonical,LEGACY_STATE,FEEDBACK_STATE,state_shape,UTILITY_SCHEMA,uses_feedback,D_STATES,validate_experiment,D4_STATE,BUDGET_VALUE_SCALE
+from .config import FB,W,H,DELTAS,TASK,GT_TASK,RewardConfig,atomic_json,digest,canonical,LEGACY_STATE,FEEDBACK_STATE,state_shape,UTILITY_SCHEMA,uses_feedback,D_STATES,validate_experiment,D4_STATE,BUDGET_VALUE_SCALE,resolve_reward_config,TRAINING_REWARD_PROTOCOL,VALIDATION_SELECTION
 from .engine import NativeProcess,verify_decode,audit_trace
 from .state import StateBuilder
 from .metrics import task,summary
 from .reward import reward,clip_objective,ProgressiveBudget
 from .model import model_hash
 
-def cache_identity(source,profile,rate,encoder,detector_identity,boxes):
+def cache_identity(source,profile,rate,encoder,detector_identity,boxes,reward_config=None):
     teacher_sha=hashlib.sha256(canonical(boxes).encode()).hexdigest()
-    return {'source_pixel_sha256':digest(source),'source_teacher_sha256':teacher_sha,'profile':asdict(profile),'rate':rate,'encoder_sha256':digest(encoder),'detector':detector_identity,'task':TASK,'utility_schema':UTILITY_SCHEMA}
+    return {'source_pixel_sha256':digest(source),'source_teacher_sha256':teacher_sha,'profile':asdict(profile),'rate':rate,'encoder_sha256':digest(encoder),'detector':detector_identity,'task':GT_TASK if reward_config is not None and reward_config.gt_ap else TASK,'utility_schema':UTILITY_SCHEMA}
 
-def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=RewardConfig(),state_version=LEGACY_STATE,reward_scale=100.,validation_gt=None):
+def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profile,rate,folder,model=None,anchor=None,price=1.,deterministic=False,fixed=None,split='train',verify=True,reward_config=None,state_version=LEGACY_STATE,reward_scale=100.,validation_gt=None,training_gt=None):
+    # No-op references have no Actor schema but use the explicitly bound reward.
+    reward_config=resolve_reward_config(state_version,reward_config) if model is not None or state_version in D_STATES else (reward_config or RewardConfig()).validate()
     if not np.isfinite(reward_scale) or reward_scale<=0:raise ValueError('Invalid reward scale')
     if state_version==D4_STATE and reward_scale!=BUDGET_VALUE_SCALE:raise ValueError('D4 analytic value requires reward_scale=100')
     reward_config.validate();state_shape(state_version)
@@ -22,21 +24,29 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
     if model is not None and model.state_version!=state_version:raise ValueError('Episode/model state schema mismatch')
     if split not in ('train','val'):raise ValueError('This research runner does not select from Test')
     if not verify:raise ValueError('Independent decoder verification cannot be disabled')
-    if validation_gt is not None:
-        from .config import VALIDATION_SELECTION
-        if split!='val' or validation_gt['protocol']!=VALIDATION_SELECTION:
-            raise ValueError('Real-label AP is Validation-only')
-        if hashlib.sha256(canonical(validation_gt['frames']).encode()).hexdigest()!=validation_gt['gt_sha256']:
-            raise ValueError('Validation GT identity differs')
-        ap_frames={f['poc']:f for f in validation_gt['frames']}
-        if len(ap_frames)!=len(validation_gt['frames']) or not ap_frames or not set(ap_frames)<=set(range(profile.frames)):
-            raise ValueError('Invalid Validation GT coverage')
+    if validation_gt is not None and split!='val':raise ValueError('Validation GT never enters Train')
+    if training_gt is not None and (split!='train' or not reward_config.gt_ap):raise ValueError('Training GT requires the explicit GT task reward')
+    gt=training_gt if split=='train' else validation_gt
+    ap_key='training_ap' if split=='train' else 'validation_ap'
+    if reward_config.gt_ap and gt is None:raise ValueError('GT AP reward requires authenticated labels for the same split; never fall back to teacher')
+    if gt is not None:
+        expected_protocol=TRAINING_REWARD_PROTOCOL if split=='train' else VALIDATION_SELECTION
+        if gt['protocol']!=expected_protocol:raise ValueError('GT task protocol/split differs')
+        if hashlib.sha256(canonical(gt['frames']).encode()).hexdigest()!=gt['gt_sha256']:raise ValueError('GT task identity differs')
+        ap_frames={f['poc']:f for f in gt['frames']}
+        if len(ap_frames)!=len(gt['frames']) or not ap_frames or not set(ap_frames)<=set(range(profile.frames)):
+            raise ValueError('Invalid GT task coverage')
+        if reward_config.gt_ap and not any(f['boxes'] for f in gt['frames']):raise ValueError('Undefined AP reward: no annotated car in clip')
     else:ap_frames={}
-    ap_predictions=[]
-    identity=cache_identity(source,profile,rate,encoder,detector_identity,boxes)
+    ap_predictions=[];ap_metrics=None
+    identity=cache_identity(source,profile,rate,encoder,detector_identity,boxes,reward_config)
     if anchor is not None and anchor['identity']!=identity:raise ValueError('Anchor cache identity mismatch')
     if anchor is not None and ('matched_iou_f1_v1' not in anchor or any('matched_iou_f1_v1' not in v for v in anchor['by_poc'].values())):raise ValueError('Anchor utility schema missing; regenerate paired anchor')
     if anchor is not None and anchor.get('split')!=split:raise ValueError('Anchor split mismatch')
+    if reward_config.gt_ap and anchor is not None:
+        proof=anchor.get(ap_key)
+        if proof is None or any(proof[k]!=gt[v] for k,v in (('protocol','protocol'),('gt_sha256','gt_sha256'),('ground_truth','frames'))):
+            raise ValueError('GT reward anchor is missing or uses different labels')
     if len(boxes)!=profile.frames:raise ValueError('Teacher POC count mismatch')
     if split!='train' and not deterministic and fixed is None:raise ValueError('Validation policy must be deterministic')
     progress=ProgressiveBudget(profile.frames,rate*1000*profile.frames/30,reward_config,anchor) if reward_config.progressive else None
@@ -63,9 +73,20 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
                 ap_predictions.append({'image_id':ap_frames[poc]['image_id'],'boxes':validation_ap_prediction(detector,yuv8)})
                 timing['validation_ap_detector']=timing.get('validation_ap_detector',0.)+time.perf_counter()-ap_started
             baseline=anchor['by_poc'][str(poc)] if anchor is not None else {'score':metrics['score'],'matched_iou_f1_v1':metrics['matched_iou_f1_v1'],'bits':outcome['bits']}
-            utility_key='score' if reward_config.utility==TASK else reward_config.utility
+            if reward_config.gt_ap:
+                score=anchor_score=0.
+                if k==profile.frames-1:
+                    from .metrics import coco_ap
+                    ap_predictions.sort(key=lambda f:f['image_id'])
+                    ap_metrics=coco_ap(gt['frames'],ap_predictions)
+                    score=ap_metrics['ap50_95']
+                    anchor_score=anchor[ap_key]['metrics']['ap50_95'] if anchor is not None else score
+                    if score is None or anchor_score is None:raise ValueError('Undefined GT AP reward')
+            else:
+                utility_key='score' if reward_config.utility==TASK else reward_config.utility
+                score,anchor_score=metrics[utility_key],baseline[utility_key]
             context=progress.step(poc,outcome['bits'],outcome['bits_total']) if progress is not None else None
-            rew=reward(metrics[utility_key],baseline[utility_key],outcome['bits'],baseline['bits'],profile.frames,state.budget,price,scale=reward_scale,config=reward_config,terminal=k==profile.frames-1,
+            rew=reward(score,anchor_score,outcome['bits'],baseline['bits'],profile.frames,state.budget,price,scale=reward_scale,config=reward_config,terminal=k==profile.frames-1,
               total_bits=outcome['bits_total'] if progress is not None or k==profile.frames-1 else None,
               anchor_total_bits=(anchor['bits'] if anchor is not None else outcome['bits_total']) if k==profile.frames-1 else None,progress=context)
             ref=state.raw[poc,:W*H].astype(np.float64)*4;mse=float(np.mean((recon[:W*H].astype(np.float64)-ref)**2))
@@ -102,18 +123,19 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
         result.update(identity=identity,state_version=state_version,split=split,rate=rate,budget=state.budget,by_poc=by_poc,coding_order=[r['poc'] for r in records],model_sha256=before,deterministic=deterministic,
           anchor_bits=anchor['bits'] if anchor is not None else result['bits'],anchor_quality=anchor['task_retention_f1_v2'] if anchor is not None else result['task_retention_f1_v2'],
           psnr_y_10bit=10*np.log10(1023**2/max(np.mean([r['mse_y_10bit'] for r in records]),1e-30)))
-        if validation_gt is not None:
+        if gt is not None:
             from .metrics import coco_ap
             ap_predictions.sort(key=lambda f:f['image_id'])
-            gt_frames=validation_gt['frames']
-            ap={'protocol':validation_gt['protocol'],'gt_sha256':validation_gt['gt_sha256'],
-                'ground_truth':gt_frames,'predictions':ap_predictions,'metrics':coco_ap(gt_frames,ap_predictions)}
+            gt_frames=gt['frames']
+            ap={'protocol':gt['protocol'],'gt_sha256':gt['gt_sha256'],
+                'ground_truth':gt_frames,'predictions':ap_predictions,'metrics':ap_metrics if ap_metrics is not None else coco_ap(gt_frames,ap_predictions)}
             if anchor is not None:
-                baseline_ap=anchor.get('validation_ap')
+                baseline_ap=anchor.get(ap_key)
                 if baseline_ap is None or any(baseline_ap[k]!=ap[k] for k in ('protocol','gt_sha256','ground_truth')):
                     raise ValueError('Anchor Validation AP protocol/GT mismatch')
             else:baseline_ap=ap
-            result.update(validation_ap=ap,anchor_validation_ap=baseline_ap)
+            result.update({ap_key:ap,'anchor_'+ap_key:baseline_ap})
+            if reward_config.gt_ap:result['gt_ap50_95']=ap['metrics']['ap50_95']
         # Mechanical accounting identity, not a claim of learned usefulness.
         raw=sum(r['reward']['raw'] for r in records)
         result['utility_version']=reward_config.utility
@@ -123,6 +145,7 @@ def run_episode(*,encoder,decoder,source,boxes,detector,detector_identity,profil
         objective=clip_objective(result['task_utility'],result['anchor_task_utility'],result['bits'],result['anchor_bits'],state.budget,price,reward_config)
         expected=objective['raw']
         result.update(reward_config=asdict(reward_config),reward_price=price,reward_scale=float(reward_scale),clip_objective=objective,
+          task_reward_source=reward_config.utility,task_reward_terminal_only=reward_config.gt_ap,
           rate_reward_nonzero_steps=sum(r['reward']['bit_component']!=0 for r in records),
           budget_schedule=('online-target-terminal-correction-v1' if reward_config.online else ('anchor-coding-order-v1' if anchor is not None else 'target-linear-final-correction-v1')) if progress is not None else None)
         if not np.isclose(raw,expected,rtol=0,atol=1e-10):raise ValueError('Reward sum does not equal clip objective')

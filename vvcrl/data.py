@@ -36,7 +36,8 @@ def prepared_clip(input_root,cache,video,frames,detector,split):
     return yuv,boxes,key
 
 
-# Validation-only real labels. Never supplied to the Actor, PPO, or reward.
+# Authenticated split-specific labels: Train reward or Validation selection.
+# Never included in Actor observations; the loader rejects Test.
 import collections,re
 from .config import VALIDATION_SELECTION,W,H,canonical
 from .locked.data import ASSETS
@@ -70,12 +71,21 @@ def label_columns(df):
 
 
 def validation_ground_truth(input_root,frames):
-    """Authenticate the original annotation file, then select the locked Val only.
+    return task_ground_truth(input_root,frames,'val')
+
+def training_ground_truth(input_root,frames):
+    return task_ground_truth(input_root,frames,'train')
+
+def task_ground_truth(input_root,frames,split):
+    """Authenticate the original annotation file, then select only the locked split.
 
     Missing/all-null labels are unknown, not negative examples. Object-annotated
     frames with no cars ARE negatives. No interpolation or Test result import.
     """
     import pandas as pd
+    from .config import TRAINING_REWARD_PROTOCOL
+    if split not in ('train','val'):raise ValueError('GT loader accepts locked Train/Validation only; never Test')
+    task_protocol=TRAINING_REWARD_PROTOCOL if split=='train' else VALIDATION_SELECTION
     lock=json.loads((ASSETS/'dataset_lock.json').read_text(encoding='utf8'))
     protocol=lock['annotation_protocol']
     expected=VALIDATION_SELECTION['annotation_sha256']
@@ -83,7 +93,7 @@ def validation_ground_truth(input_root,frames):
             or protocol['annotation_fps_assumption']!=5 or protocol['bbox_coordinate_mode']!='display'):
         raise ValueError('Unsupported GT annotation mapping')
     paths=sorted(p for p in Path(input_root).rglob('mot_labels.parquet') if digest(p)==expected)
-    if not paths:raise FileNotFoundError('Add Driving Video with Object Tracking including the locked mot_labels.parquet; teacher boxes/Test SAFE are not Validation GT')
+    if not paths:raise FileNotFoundError('Add Driving Video with Object Tracking including the locked mot_labels.parquet; teacher boxes/Test SAFE are not authenticated task GT')
     df=pd.read_parquet(paths[0])
     if any(x is not None for x in df.index.names):df=df.reset_index()
     if 'box2d' in df.columns:
@@ -94,8 +104,8 @@ def validation_ground_truth(input_root,frames):
         b=pd.json_normalize(df['box2d'].map(parse));b.index=df.index
         df=df.drop(columns=['box2d']).join(b.add_prefix('box2d.'))
     cols=label_columns(df)
-    ids=VideoCatalog(input_root,mode='mini',seed=20261111).selected['val']
-    if len(ids)!=4:raise ValueError('GT selection requires the locked four Validation videos')
+    ids=VideoCatalog(input_root,mode='mini',seed=20261111).selected[split]
+    if len(ids)!=(16 if split=='train' else 4):raise ValueError('GT selection differs from locked split size')
     vids=df[cols['video']].astype(str).str.extract(r'([0-9a-f]{8}-[0-9a-f]{8})',expand=False)
     df=df.loc[vids.isin(ids)].copy();df['_vid']=vids.loc[df.index]
     records={x['video_id']:x for x in lock['video_records']}
@@ -124,11 +134,11 @@ def validation_ground_truth(input_root,frames):
                 if box[2]<=box[0] or box[3]<=box[1]:raise ValueError('Car box outside display')
                 if box.tolist() in cars:raise ValueError('Duplicate car annotation')
                 cars.append(box.tolist())
-            rows.append(dict(image_id=vi*100000+poc+1,video_id=vid,poc=poc,boxes=cars))
-        if len(rows)<min(10,len(range(0,frames,6))):raise ValueError('Insufficient explicit Validation labels: '+vid)
+            rows.append(dict(image_id=(10000000 if split=='train' else 0)+vi*100000+poc+1,video_id=vid,poc=poc,boxes=cars))
+        if len(rows)<min(10,len(range(0,frames,6))):raise ValueError('Insufficient explicit '+split+' labels: '+vid)
         rows=sorted(rows,key=lambda x:x['poc'])
-        if not any(x['boxes'] for x in rows):raise ValueError('No car GT in Validation video: '+vid)
-        result[vid]={'protocol':VALIDATION_SELECTION,'frames':rows,'gt_sha256':hashlib.sha256(canonical(rows).encode()).hexdigest()}
+        if not any(x['boxes'] for x in rows):raise ValueError('No car GT in '+split+' video: '+vid)
+        result[vid]={'protocol':task_protocol,'frames':rows,'gt_sha256':hashlib.sha256(canonical(rows).encode()).hexdigest()}
     return result
 
 
@@ -136,7 +146,7 @@ def validation_ap_prediction(detector,yuv8):
     """Sequential low-conf AP inference; ALWAYS restore the teacher threshold.
 
     One detector belongs to one collector. No background thread shares this model.
-    The .25 teacher state/reward inference has already completed for this frame.
+    The .25 teacher state/auxiliary inference has already completed for this frame.
     """
     model=detector.model
     if (model.conf,model.iou,model.max_det,model.classes,model.amp)!=(.25,.45,300,[2],False):

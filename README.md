@@ -1,16 +1,6 @@
-> Current research branch: D4 full-clip credit revision. The three staged
-> D-series launchers select gamma=1/lambda=1 consistently through preflight,
-> training, gate recheck and resume; `CREDIT_MODE=gae095` is a separate fresh
-> control. Reward, state, two-region action and native VVenC are unchanged.
-> Fresh preflight/weights are required. This is a tested learning-mechanism
-> revision, **not evidence that PPO now beats QPA or fixed controls**.
-> Python API and CLI now resolve the same D4 default; explicit .95 remains a
-> controlled alternative. Runtime source verification and notebook-distribution
-> verification have separate, strict scopes. Optional D4 control diagnosis uses
-> real-GT RD and is blocked until an encode budget is explicitly authorized.
-> See [the D-series design and limits](docs/D_SERIES.md).
-
-> Current D4: rerun the updated Stage 1 preflight, then fresh Stage 2 (10 updates). Attach Driving Video with Object Tracking including `mot_labels.parquet`. Old D4 gates/checkpoints cannot resume this RD-selection revision. Actor architecture, reward and native integration are unchanged; PPO now uses the explicit credit mode above, and validation selection is real-label BD-rate/BD-AP, not teacher F1. This is not yet evidence of better compression/task performance.
+> Current D4 experiment: supervised **Train GT AP50:95 task reward**, with full-clip credit (gamma=lambda=1), unchanged bitrate cap and native QPA integration. Train labels never enter Actor/state. Validation selects by real-GT BD-rate/BD-AP; Test never selects. This changes the training method from the historical teacher-only proxy; it is not a label-free paper reproduction.
+>
+> Use the newly pinned D-Series Stage 1, then fresh Stage 2 weights. Old proxy gates/checkpoints are incompatible. CPU tests establish accounting/learning mechanics, **not that PPO now beats QPA or fixed controls**. See [method, evidence and limits](docs/D_SERIES.md).
 
 # VVC_RL — task-aware residual QP control over native VVenC QPA
 
@@ -20,9 +10,9 @@ This is a new research implementation, not a resume of the earlier Gaussian/PPO 
 
 On `research/d-series-adaptive-policy`, use [D-Series Preflight](notebooks/VVC_RL_D_Series_01_Preflight_Kaggle.ipynb), then [Train 10 updates](notebooks/VVC_RL_D_Series_02_Train10_Kaggle.ipynb). Review the first 10 updates before using [Resume to 40](notebooks/VVC_RL_D_Series_03_Resume30_Kaggle.ipynb). These launchers default to **D4**, pin an immutable functional commit and fingerprint, and require a fresh same-source gate. Historical B/V2 launchers below remain pinned controls.
 
-D4 preserves D3's 11 spatial / 20 global state, two ROI/background categoricals, native encoder, reward, auxiliary and 2% cap. The critic adds the known causal budget-refund potential analytically; the neural value target excludes it. Actor probabilities are not forced to change. See [D-series method, evidence and limits](docs/D_SERIES.md). D3 checkpoints cannot resume D4 even though weight shapes coincide. Start fresh; unchanged legacy methods remain available for controlled comparisons.
+D4 preserves D3's 11 spatial / 20 global state, two ROI/background categoricals, native encoder, Critic-only auxiliary and 2% cap. The critic adds the known causal budget-refund potential analytically; the neural value target excludes it. The task objective is now clip GT AP50:95 minus paired QPA clip GT AP50:95, delivered at the final coding step. Budget shaping and terminal excess cost remain unchanged; no spare-bit bonus. Actor probabilities are not forced to change. See [D-series method, evidence and limits](docs/D_SERIES.md). D3 checkpoints cannot resume D4 even though weight shapes coincide. Start fresh; unchanged legacy methods remain available for controlled comparisons.
 
-Stage 1 needs the locked BDD100K MOV dataset. Stage 2 additionally needs the **new D4** preflight SAFE and its exact toolchain bundle. Stage 3 also needs the completed D4 Stage 2 SAFE. Kaggle-expanded outer SAFE payloads and toolchain directories are supported. Do not manually unpack `VVC_RL_payload.bin`. CPU tests/replay do not prove detection improvement; native two-GPU preflight and matched validation remain mandatory.
+Stage 1 needs the locked BDD100K MOV dataset plus authenticated `mot_labels.parquet`; it checks all 16 Train and 4 Val label coverages before native builds and requires 19 gate checks. Stage 2 additionally needs the **new D4** preflight SAFE and its exact toolchain bundle. Stage 3 also needs the completed D4 Stage 2 SAFE. Kaggle-expanded outer SAFE payloads and toolchain directories are supported. Do not manually unpack `VVC_RL_payload.bin`. CPU tests/replay do not prove detection improvement; native two-GPU preflight and matched validation remain mandatory.
 
 ## Historical B/V2 research design
 

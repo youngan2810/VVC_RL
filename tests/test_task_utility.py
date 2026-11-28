@@ -6,6 +6,40 @@ from vvcrl.reward import clip_objective,reward,ProgressiveBudget
 from vvcrl.validation import validation_summary
 
 class UtilityTests(unittest.TestCase):
+    def test_gt_binding_requires_full_credit_and_training_ap_gate(self):
+        from unittest.mock import patch
+        from vvcrl.config import D4_STATE,GT_REWARD,PPOConfig,Profile,TRAINING_REWARD_PROTOCOL,GT_TASK
+        from vvcrl.gates import binding,required_checks
+        with patch('vvcrl.gates.fingerprint',return_value='fixture'),patch('vvcrl.gates.digest',return_value='fixture'):
+            b=binding('.',dict(encoder='fixture',vanilla='fixture',decoder='fixture'),Profile(),state_version=D4_STATE)
+            self.assertEqual(b['reward']['version'],GT_REWARD);self.assertEqual(b['task'],GT_TASK)
+            self.assertEqual(b['training_reward_protocol'],TRAINING_REWARD_PROTOCOL)
+            self.assertIn('training_gt_ap',required_checks(b));self.assertEqual(len(required_checks(b)),19)
+            with self.assertRaisesRegex(ValueError,'full-clip'):
+                binding('.',{},Profile(),state_version=D4_STATE,ppo_config=PPOConfig(gae_lambda=.95))
+    def test_gt_ap_reward_is_terminal_exact_and_cap_unchanged(self):
+        from vvcrl.config import GT_REWARD,D4_STATE,resolve_reward_config,resolve_ppo_config,validate_experiment,D3_STATE
+        from vvcrl.reward import bitrate_cap
+        from vvcrl.gates import binding
+        cfg=RewardConfig(GT_REWARD)
+        self.assertEqual(resolve_reward_config(D4_STATE),cfg)
+        self.assertEqual(resolve_ppo_config(D4_STATE).gae_lambda,1.)
+        self.assertEqual(cfg.utility,'gt_ap50_95');self.assertTrue(cfg.online)
+        with self.assertRaises(ValueError):validate_experiment(D3_STATE,cfg)
+        for amounts in ([100,100,100,100],[400,300,200,100]):
+            tracker=ProgressiveBudget(4,1000,cfg,{'bits':700,'coding_order':[0,1,2,3],
+                'by_poc':{str(i):{'bits':175} for i in range(4)}})
+            rows=[];used=0
+            for k,b in enumerate(amounts):
+                used+=b;context=tracker.step(k,b,used);terminal=k==3
+                rows.append(reward(.8 if terminal else 0.,.7 if terminal else 0.,b,175,4,1000,2.,
+                    config=cfg,terminal=terminal,total_bits=used,anchor_total_bits=700 if terminal else None,progress=context))
+            self.assertTrue(all(z['task_component']==0 for z in rows[:-1]))
+            self.assertAlmostEqual(sum(z['task_component'] for z in rows),.1)
+            self.assertAlmostEqual(sum(z['raw'] for z in rows),clip_objective(.8,.7,used,700,1000,2.,cfg)['raw'])
+            self.assertEqual(bitrate_cap(1000,700,cfg),bitrate_cap(1000,700,RewardConfig()))
+        with self.assertRaises(ValueError):reward(.8,.7,100,100,4,1000,1.,config=cfg)
+
     def test_empty_duplicate_localization_confidence(self):
         a=[[0,0,100,100,.8]]
         self.assertEqual(task([],[])['matched_iou_f1_v1'],1.)
@@ -48,6 +82,82 @@ class UtilityTests(unittest.TestCase):
 
 
 class GroundTruthRDTests(unittest.TestCase):
+    def test_training_labels_are_separate_and_never_accept_test(self):
+        import tempfile,json,pandas as pd,hashlib
+        from pathlib import Path
+        from unittest.mock import patch
+        from vvcrl.data import training_ground_truth,task_ground_truth
+        from vvcrl.locked.data import VideoCatalog
+        from vvcrl.config import TRAINING_REWARD_PROTOCOL,VALIDATION_SELECTION,canonical
+        ids=VideoCatalog('/missing',mode='mini',seed=20261111).selected
+        rows=[dict(video=v,frameIndex=k,category='car',x1=0,y1=0,x2=100,y2=100)
+              for v in ids['train']+ids['val']+ids['test'][:1] for k in range(12)]
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);(p/'mot_labels.parquet').write_bytes(b'CPU_LABEL_FIXTURE')
+            with patch('vvcrl.data.digest',return_value=VALIDATION_SELECTION['annotation_sha256']),patch('pandas.read_parquet',return_value=pd.DataFrame(rows)):
+                gt=training_ground_truth(p,256)
+                self.assertEqual(set(gt),set(ids['train']));self.assertEqual(len(gt),16)
+                for v,proof in gt.items():
+                    self.assertEqual(proof['protocol'],TRAINING_REWARD_PROTOCOL)
+                    self.assertEqual({f['video_id'] for f in proof['frames']},{v})
+                    self.assertEqual(proof['frames'][1]['poc'],6)
+                    self.assertGreaterEqual(proof['frames'][0]['image_id'],10000000)
+                    self.assertEqual(hashlib.sha256(canonical(proof['frames']).encode()).hexdigest(),proof['gt_sha256'])
+            with self.assertRaises(ValueError):task_ground_truth(p,256,'test')
+
+    def test_gt_reward_episode_uses_train_ap_not_teacher_and_blocks_leakage(self):
+        import tempfile,json,hashlib,torch
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from vvcrl.config import FB,Profile,D4_STATE,GT_REWARD,TRAINING_REWARD_PROTOCOL,VALIDATION_SELECTION,canonical,digest
+        from vvcrl.episode import run_episode
+        from vvcrl.model import ActorCritic,model_hash
+        torch.set_num_threads(1)
+        class Native:
+            def __init__(self,encoder,source,folder,profile,rate,**kw):
+                self.folder=Path(folder);self.folder.mkdir();(self.folder/'recon').mkdir();self.k=self.bits=0
+            def observation(self):
+                return dict(schema='vvc-rl-online/1',k=self.k,bits_before=self.bits,width=480,height=320,ctu=128,
+                    poc=31-self.k,qp=[30]*12,activity=[1]*12,slice_qp=30,temporal_layer=0,reference=True,slice_type=2)
+            def step(self,d):
+                self.bits+=1000;out=dict(k=self.k,poc=31-self.k,bits=1000,bits_total=self.bits,winning_qp=np.full((3,4),30.).tolist())
+                self.k+=1;return out,np.full(FB,512,np.uint16)
+            def finish(self):
+                stream=self.folder/'stream.266';stream.write_bytes(bytes(self.bits//8))
+                return dict(bits=self.bits,actual_kbps=self.bits*30/32/1000,bitstream_sha256=digest(stream))
+            def close(self):pass
+        class Detector:
+            model=SimpleNamespace(conf=.25,iou=.45,max_det=300,classes=[2],amp=False)
+            shift=20
+            def __call__(self,picture):return np.array([[self.shift,0,100+self.shift,100,.9]]) if self.model.conf==.001 else np.empty((0,5))
+        frames=[dict(image_id=10000001+p,video_id='train_fixture',poc=p,boxes=[[0,0,100,100]]) for p in (0,6)]
+        gt=dict(protocol=TRAINING_REWARD_PROTOCOL,frames=frames,gt_sha256=hashlib.sha256(canonical(frames).encode()).hexdigest())
+        cfg=RewardConfig(GT_REWARD);model=ActorCritic(D4_STATE);before=model_hash(model);detector=Detector()
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);source=p/'source.yuv';source.write_bytes(bytes([128])*FB*32);encoder=p/'encoder';encoder.write_bytes(b'CPU_ONLY_NATIVE_FIXTURE')
+            args=dict(encoder=encoder,decoder=None,source=source,boxes=[[[0,0,100,100,.9]]]*32,detector=detector,
+                detector_identity={'fixture':True},profile=Profile(frames=32),rate=120,split='train',reward_config=cfg,training_gt=gt)
+            with patch('vvcrl.episode.NativeProcess',Native),patch('vvcrl.episode.verify_decode',return_value=True),patch('vvcrl.episode.audit_trace',return_value={'fixture':True}):
+                anchor,_=run_episode(**args,folder=p/'anchor')
+                detector.shift=0
+                result,batch=run_episode(**args,folder=p/'policy',model=model,state_version=D4_STATE,anchor=anchor)
+            self.assertEqual(result['task_retention_f1_v2'],0)
+            self.assertAlmostEqual(result['task_utility'],1.)
+            self.assertGreater(result['task_utility'],result['anchor_task_utility'])
+            records=json.loads((p/'policy/frames.json').read_text())
+            self.assertTrue(all(f['reward']['task_component']==0 for f in records[:-1]))
+            self.assertAlmostEqual(sum(batch['reward']),100*(result['task_utility']-result['anchor_task_utility']),places=6)
+            self.assertLess(result['reward_identity_error'],1e-10)
+            self.assertNotIn('validation_ap',result);self.assertEqual(result['training_ap']['protocol'],TRAINING_REWARD_PROTOCOL)
+            self.assertEqual(before,model_hash(model));self.assertEqual(detector.model.conf,.25)
+            with patch('vvcrl.episode.NativeProcess') as native:
+                bad=dict(args);bad.pop('training_gt')
+                with self.assertRaises(ValueError):run_episode(**bad,folder=p/'bad',model=model,state_version=D4_STATE)
+                bad['validation_gt']=dict(gt,protocol=VALIDATION_SELECTION)
+                with self.assertRaises(ValueError):run_episode(**bad,folder=p/'bad2',model=model,state_version=D4_STATE)
+                native.assert_not_called()
+
     def test_coco_confidence_ranking_negative_frames_and_iou(self):
         from vvcrl.metrics import coco_ap
         gt=[dict(image_id=1,boxes=[[0,0,100,100]]),dict(image_id=2,boxes=[])]

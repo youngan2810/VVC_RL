@@ -1,10 +1,10 @@
 # D-series controlled QP research
 
-## Current experiment: D4 with real-label RD checkpoint selection
+## Current experiment: D4 with supervised Train GT AP reward
 
 D35 controls established useful clip-level alternatives in the existing action space. The matched-prefix diagnostic completed 4 baseline replays and 24 single-step interventions on 8 Train states: all prefixes matched and all alternatives remained inside the original cap. Only one state had a tested utility improvement above the declared 0.001 threshold. Immediate quality could improve while final quality deteriorated, and matched-IoU utility could improve while teacher F1 deteriorated. This does not establish a unique implementation bug, a need to replace PPO, or an optimal action duration.
 
-D4 isolates one supported intervention: remove the known budget potential from the neural critic's learning burden. The value decomposition is retained. The earlier RD-selection revision changed checkpoint selection only. The current full-clip credit revision below changes the selected return estimator; native code, Actor architecture, action space, state information and reward formula remain unchanged. No Test outcome was used to tune it.
+D4 isolates one supported intervention: remove the known budget potential from the neural critic's learning burden. The value decomposition is retained. The earlier RD-selection revision changed checkpoint selection only. The full-clip credit revision changed the return estimator. The current supervised reward revision additionally replaces only the task surrogate with clip GT AP50:95; native code, Actor architecture, action space and state information remain unchanged. No Test outcome was used to tune it.
 
 | Variant | State/model convention | Reward |
 |---|---|---|
@@ -14,7 +14,7 @@ D4 isolates one supported intervention: remove the known budget potential from t
 | D2 | d2-region-v1 | task-budget-v3-progressive-soft-iou |
 | D2-neutral | d2-region-neutral-v1 | task-budget-v3-progressive-soft-iou |
 | D3 | d3-online-budget-v1 | task-budget-v4-online-soft-iou |
-| **D4** | **d4-budget-value-v1** | **task-budget-v4-online-soft-iou (unchanged)** |
+| **D4** | **d4-budget-value-v1** | **task-budget-v5-online-gt-ap50-95** |
 
 D1 separates Actor and Critic/Aux representations; D1i and later variants also use independent clipping budgets on disjoint Adam parameter groups. D2 adds nonlinear cross-region residual logits; D3 adds causal budget pressure/headroom and online target-linear intermediate caps. All previous identifiers and numerical behavior are retained.
 
@@ -52,15 +52,36 @@ PPO saves budget offset, residual value/returns and Monte Carlo advantage alongs
 
 ### Checkpoint selection (D4, current source only)
 
-Use the same locked four Validation videos at **50/80/120/160/200 kbps**, 256 frames, every five updates. Authenticate `mot_labels.parquet` against the original dataset lock. Label frameIndex maps to normalized POC by multiplying by six, offset zero, using the reviewed display coordinates. Exclude unknown/all-null frames; explicitly annotated frames with other classes but no cars remain negative examples. Ground truth is never passed into Train, state, PPO or reward. Test is never used for checkpoint selection.
+Use the same locked four Validation videos at **50/80/120/160/200 kbps**, 256 frames, every five updates. Authenticate `mot_labels.parquet` against the original dataset lock. Label frameIndex maps to normalized POC by multiplying by six, offset zero, using the reviewed display coordinates. Exclude unknown/all-null frames; explicitly annotated frames with other classes but no cars remain negative examples. Validation ground truth is never passed into Train; separate locked Train labels supply the new learner reward. Neither split supplies GT to Actor/state. Test is never used for checkpoint selection.
 
-The frozen YOLOv5n AP inference uses confidence 0.001, NMS 0.45, maxDets 300, FP32, car only. It runs separately on annotated decoded frames; the state/reward teacher remains confidence 0.25. AP is COCO bbox 101-recall AP50 and AP50:95, pooled across the four videos at each rate, not an average of per-frame AP. Rates are total bitstream bits divided by total clip duration, not requested kbps. The original independent decode, bit accounting, action audit and seals still apply to every episode and QPA anchor.
+The frozen YOLOv5n AP inference uses confidence 0.001, NMS 0.45, maxDets 300, FP32, car only. It runs separately on annotated decoded frames; the state/auxiliary teacher remains confidence 0.25. AP is COCO bbox 101-recall AP50 and AP50:95, pooled across the four videos at each rate, not an average of per-frame AP. Rates are total bitstream bits divided by total clip duration, not requested kbps. The original independent decode, bit accounting, action audit and seals still apply to every episode and QPA anchor.
 
 `best_validation.pt` minimizes pooled **BD-rate AP50:95 vs QPA**. An eligible checkpoint must have complete 20-pair coverage, every pair inside `(1+0.02)*min(target_bits,QPA_bits)`, negative BD-rate AP50:95 and positive BD-AP50:95. Exact BD-rate ties (1e-9 numerical tolerance) prefer larger BD-AP50:95, then the earlier checkpoint. AP50 metrics are supplemental. BD-AP is in percentage points, not relative percent. PCHIP integrates only common domains of the logged Pareto frontiers; dominated points and overlap ranges remain auditable. Undefined overlap or insufficient points are N/A, never zero or a teacher-F1 fallback.
 
 Reports retain all five pooled QPA/PPO RD points, both BD metrics, all per-pair cap decisions and teacher F1/utility diagnostics. If nothing qualifies, only latest and weight snapshots are available; no fabricated best or secondary utility checkpoint is produced for this D4 protocol. Progress uses `best_validation_rd`, not the historical `best_validation_gain`. Resume uses latest and the identical bound source, GT, selection protocol and metric engine versions. Historical variants retain their explicitly labelled teacher-F1 selection.
 
-This aligns model selection with the research endpoint; it does not prove D4 learns a useful allocation or guarantees a -10% BD-rate/+10% BD-mAP gain. The reward remains the existing dense teacher matched-IoU/budget surrogate. Any surrogate/GT gap must be measured, not hidden. Final frozen Test evaluation compares VVC original, VVC+RL and, when compatible artifacts are available, H264+RL; the paper comparator never selects the VVC policy.
+This aligns model selection with the research endpoint; it does not prove D4 learns a useful allocation or guarantees a -10% BD-rate/+10% BD-mAP gain. The new Train task reward uses clip GT AP50:95. Per-clip training AP and four-video pooled Validation RD have different aggregation; alignment of metric definition does not guarantee improvement in pooled BD metrics. Final frozen Test evaluation compares VVC original, VVC+RL and, when compatible artifacts are available, H264+RL; the paper comparator never selects the VVC policy.
+
+
+## Supervised GT task reward and module contract
+
+The completed Actor-credit report contains 36 paired Train interventions: 14 improve GT AP50:95; five of those have nonpositive old teacher-objective deltas. Both candidate and baseline satisfy the cap in these controls. This verifies a task-surrogate mismatch on these observations, not the unique cause of failed policy learning. For those feasible pairs, the new task-objective change equals their AP50:95 difference by construction. No new native training improvement has been demonstrated.
+
+```
+cap = (1 + 0.02) * min(target_bits, paired_QPA_bits)
+J = AP50:95_GT_clip - AP50:95_GT_QPA_clip
+    - price * max(0, (actual_bits - cap) / target_bits)
+```
+
+Only the task term changes. It is computed once on all explicitly annotated frames of the completed decoded clip, using the existing official COCO evaluator, low-confidence FP32 car predictions and unchanged annotation mapping. It is NOT an average of frame AP, teacher F1, or directly computed BD-rate. No positive reward is given merely for spare bits. The existing online budget potential and terminal cap correction telescope to this same objective. PPO's complete reward-to-go, Actor baseline and residual Critic target share the same shaped-return convention, reward scale 100 and gamma=lambda=1. All earlier actions receive the terminal task outcome through complete returns; this is not state/action-specific causal credit.
+
+Train labels come ONLY from the locked 16 Train videos, with the original parquet hash and frameIndex*6 mapping. Validation uses its own four videos solely for frozen model selection; Test is rejected by this loader. Missing/undefined GT aborts before collection, never falls back to teacher scores. All-null frames remain unknown; explicitly annotated non-car frames remain negatives. GT is not an observation, ROI mask, Actor input or deployed inference dependency. Existing source-detector cues define ROI; the teacher-based auxiliary stays isolated in the Critic. This is a supervised reward experiment and must be reported as such.
+
+Configuration, cached anchors, split/video GT proofs, episodes, rollout loading, training journals, checkpoints and preflight bind the same GT reward/protocol. `training_gt_ap` is the nineteenth preflight check and independently recomputes official AP for saved Train predictions/anchors. `TRAINING_GT.json` joins the resume identity checks. Python/CLI and all four D-series launchers select the same default. Old proxy source/gates/optimizer checkpoints cannot resume; start fresh. Named old reward versions remain available for explicit controls.
+
+Higher variance from terminal AP and sparse labelled frames remains a research risk. Two independent clips per update are not 512 independent task outcomes. Train clip AP and pooled Validation RD differ in aggregation, and a soft penalty does not guarantee hard budget feasibility. The unchanged all-20-pair Validation cap gate and BD-rate/BD-AP eligibility stay mandatory. Keep 16/4/30, five rates 50/80/120/160/200 and review 10 updates before authorizing the remaining 30. No target gain, action diversity or useful learning is guaranteed.
+
+Local verification uses existing CPU fixtures, official AP, intact historical outcomes and exact optimizer/RNG resume comparisons. The full real parquet/16-video coverage, real encoder/decoder with this reward, T4 collectors and fresh short-run effectiveness must still pass on Kaggle. Do not substitute CPU fixture PASS for those measurements.
 
 ## Kaggle workflow and compatibility
 
@@ -70,12 +91,12 @@ This aligns model selection with the research endpoint; it does not prove D4 lea
 
 All launchers pin the same immutable functional commit and fingerprint and default to D4. Changing VARIANT to D3 provides a same-source control but requires its own fresh preflight and training. Do not reuse D3/B/Combined checkpoints or gates for D4: weight shapes are not a semantic compatibility test. Start from fresh weights. The earlier D4 teacher-F1 preflight is also incompatible with this source-bound RD selection revision; rerun Stage 1. An interrupted same-version, same-source stage can resume from its non-FAILED SAFE via PARTIAL_STAGE_INPUT. Completed exports are preserved on failure.
 
-The mini protocol stays 16 Train / 4 Validation, 256 frames, all 5 Train rates 50/80/120/160/200, seed 20261120 and the mixed 40-update/80-clip schedule. D4 Validation now uses four videos at all five rates every five updates; 20 anchor/policy pairs rather than 12. A preflight checks all four GT coverages and the real AP path on one Val clip, not the full expensive RD matrix. It cannot establish a useful learned policy. No Test selection. PPO LR 1e-4, 3 epochs, gamma 1, auxiliary .1 and entropy .01 remain unchanged; the current full-clip launchers explicitly select lambda 1.0, while CREDIT_MODE=gae095 retains lambda .95 as a fresh controlled experiment. Partition/MTS, action duration and joint-action redesign are deferred until there is evidence for a separate intervention.
+The mini protocol stays 16 Train / 4 Validation, 256 frames, all 5 Train rates 50/80/120/160/200, seed 20261120 and the mixed 40-update/80-clip schedule. D4 Validation now uses four videos at all five rates every five updates; 20 anchor/policy pairs rather than 12. A preflight checks all 16 Train/four Val GT coverages and independently replays AP on the mechanical Train batch and one Val clip, not the full expensive RD matrix. It cannot establish a useful learned policy. No Test selection. PPO LR 1e-4, 3 epochs, gamma 1, auxiliary .1 and entropy .01 remain unchanged; the current full-clip launchers explicitly select lambda 1.0, while the new GT reward rejects CREDIT_MODE=gae095; lambda .95 requires explicitly selecting the historical proxy reward as a separate fresh experiment. Partition/MTS, action duration and joint-action redesign are deferred until there is evidence for a separate intervention.
 
 SAFE can be an intact ZIP or Kaggle-expanded payload.bin plus its hash sidecar; toolchain can be ZIP or an expanded manifest/executable directory. Do not expand the inner payload.bin. The legacy B/V2 launchers remain pinned historical controls. The all-in-one D-series notebook is retained, defaulting to D4 with training disabled.
 
 
-## Current full-clip Actor credit revision
+## Full-clip Actor credit mechanism (retained)
 
 Evidence: the completed D4 Actor-credit report verified 40 native cases (36 paired
 interventions at two Train states, 50 kbps). Actions were not erased by QPA.
@@ -96,12 +117,14 @@ Critic target use the SAME complete sampled clip return. Reward-to-go is compute
 directly in float64, then returned as checked float32 tensors, avoiding
 cancellation through intermediate shaped Critic values. Only V(s_t) is subtracted
 for the Actor baseline; the Critic's known budget offset is subtracted once from
-its neural target. Done masks isolate clips and terminal excess cost. Reward,
-cap, state, architecture, argmax and native code are unchanged. PPOConfig's
+its neural target. Done masks isolate clips and terminal excess cost. The cap,
+state, architecture, argmax and native code are unchanged; the task reward is
+now the supervised GT objective described below. PPOConfig's
 historical dataclass default remains .95; resolve_ppo_config selects D4 lambda=1
 when no config is supplied. CLI, PPO, binding, preflight, mini_train and diagnose
 all use that resolver; launchers pass the choice explicitly. An explicit
-PPOConfig(gae_lambda=.95) remains a separate control, not an automatic fallback.
+PPOConfig(gae_lambda=.95) remains a separate historical proxy control, not
+an automatic fallback; the GT reward requires lambda=1.
 Binding/checkpoint/gate checks include the chosen value.
 
 Read-only diagnostics now include the 25 joint ROI/background pairs (only when

@@ -20,7 +20,9 @@ def reward(score,anchor_score,bits,anchor_bits,frames,budget,price,scale=100.,*,
     config.validate()
     if not np.isfinite([score,anchor_score,bits,anchor_bits,frames,budget,price,scale]).all() or frames<=0 or int(frames)!=frames or min(budget,bits,anchor_bits,scale)<=0 or price<0 or not 0<=score<=1 or not 0<=anchor_score<=1:
         raise ValueError('Invalid reward accounting')
-    quality=(score-anchor_score)/frames
+    if config.gt_ap and not terminal and (score!=0 or anchor_score!=0):
+        raise ValueError('GT AP task reward is terminal only; never average per-frame AP')
+    quality=(score-anchor_score) if config.gt_ap else (score-anchor_score)/frames
     if config.progressive:
         if progress is None or total_bits is None:raise ValueError('Progressive reward requires causal budget context')
         previous_cap,cap=progress['previous_cap_bits'],progress['cumulative_cap_bits']

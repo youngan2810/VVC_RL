@@ -3,7 +3,7 @@ from pathlib import Path
 import json,platform
 import numpy as np
 import torch
-from .config import SCHEMA,TASK,PPOConfig,RewardConfig,atomic_json,canonical,digest,fingerprint,LEGACY_STATE,state_shape,UTILITY_SCHEMA,validate_experiment,D4_STATE,BUDGET_VALUE_SCALE,resolve_ppo_config
+from .config import SCHEMA,TASK,GT_TASK,PPOConfig,RewardConfig,atomic_json,canonical,digest,fingerprint,LEGACY_STATE,state_shape,UTILITY_SCHEMA,validate_experiment,D4_STATE,BUDGET_VALUE_SCALE,resolve_ppo_config,resolve_reward_config,TRAINING_REWARD_PROTOCOL
 from .data import DETECTOR_ID
 
 MANDATORY=('unit_contracts','rgb_protocol','native_noop_parity','all_five_integer_bins','spatial_mapping','actor_to_encoder',
@@ -11,9 +11,11 @@ MANDATORY=('unit_contracts','rgb_protocol','native_noop_parity','all_five_intege
  'logprob_value_replay','actor_head_updated','critic_head_updated','reward_identity','validation_no_update','checkpoint_reload')
 
 def environment():return {'python':platform.python_version(),'torch':str(torch.__version__),'numpy':np.__version__}
-def binding(root,toolchain,profile,workers=2,reward_config=RewardConfig(),ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE):
+def binding(root,toolchain,profile,workers=2,reward_config=None,ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE):
     ppo_config=resolve_ppo_config(state_version,ppo_config)
-    profile.validate();reward_config.validate();validate_experiment(state_version,reward_config)
+    reward_config=resolve_reward_config(state_version,reward_config)
+    profile.validate()
+    if reward_config.gt_ap and ppo_config.gae_lambda!=1.:raise ValueError('GT clip AP reward requires full-clip credit lambda=1')
     if state_version==D4_STATE and ppo_config.reward_scale!=BUDGET_VALUE_SCALE:raise ValueError('D4 analytic value requires reward_scale=100')
     if train_schedule not in ('blocked','mixed'):raise ValueError('Unknown training schedule')
     result={'schema':SCHEMA,'task':TASK,'source_sha256':fingerprint(root),'profile':asdict(profile),'ppo':asdict(ppo_config),'train_schedule':train_schedule,'reward':asdict(reward_config),'detector':DETECTOR_ID,
@@ -24,9 +26,13 @@ def binding(root,toolchain,profile,workers=2,reward_config=RewardConfig(),ppo_co
         if importlib.metadata.version('pycocotools')!='2.0.11':raise ValueError('COCO AP engine must be pycocotools==2.0.11')
         result['validation_selection']=VALIDATION_SELECTION
         result['metric_environment']={k:importlib.metadata.version(k) for k in ('pycocotools','scipy')}
+    if reward_config.gt_ap:
+        result['task']=GT_TASK
+        result['training_reward_protocol']=TRAINING_REWARD_PROTOCOL
     return result
 def required_checks(bind):
-    return (*MANDATORY,*(('validation_gt_ap',) if 'validation_selection' in bind else ()))
+    return (*MANDATORY,*(('validation_gt_ap',) if 'validation_selection' in bind else ()),
+            *(('training_gt_ap',) if 'training_reward_protocol' in bind else ()))
 
 def write_gate(folder,bind,checks,evidence):
     folder=Path(folder)

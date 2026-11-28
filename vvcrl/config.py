@@ -5,6 +5,7 @@ from pathlib import Path
 SCHEMA='vvc-rl-qpa-ppo/3'
 CHECKPOINT_SCHEMA='vvc-rl-checkpoint/3'
 TASK='task_retention_f1_v2'
+GT_TASK='car_detection_gt_ap50_95'
 UPSTREAM='1a4f83bd9feeb91c6792fb8e0676b1c8f3683d4f'
 DELTAS=(-2,-1,0,1,2)
 RATES=(50,80,120,160,200)
@@ -37,21 +38,22 @@ def uses_feedback(version):
     return version!=LEGACY_STATE
 
 ONLINE_REWARD='task-budget-v4-online-soft-iou'
+GT_REWARD='task-budget-v5-online-gt-ap50-95'
 COMBINED_REWARD='task-budget-v3-progressive-soft-iou'
 
 def validate_experiment(state_version,reward_config):
     state_shape(state_version);reward_config.validate()
     if state_version in D_STATES:
         expected=ONLINE_REWARD if state_version in ONLINE_STATES else COMBINED_REWARD
-        if reward_config.version!=expected:raise ValueError('D-series state/reward binding mismatch')
-    elif reward_config.version==ONLINE_REWARD:
+        if reward_config.version!=expected and not (state_version==D4_STATE and reward_config.version==GT_REWARD):raise ValueError('D-series state/reward binding mismatch')
+    elif reward_config.online:
         raise ValueError('Online reward requires an online-budget state for policy experiments')
 
 def state_shape(version=LEGACY_STATE):
     if version not in STATE_SHAPES:raise ValueError('Unknown state schema: '+str(version))
     return STATE_SHAPES[version]
 
-REWARD_VERSIONS=('task-budget-v2','paired-linear-v1','task-budget-v3-progressive','task-budget-v2-soft-iou','task-budget-v3-progressive-soft-iou',ONLINE_REWARD)
+REWARD_VERSIONS=('task-budget-v2','paired-linear-v1','task-budget-v3-progressive','task-budget-v2-soft-iou','task-budget-v3-progressive-soft-iou',ONLINE_REWARD,GT_REWARD)
 UTILITY_SCHEMA='teacher-f1-and-matched-iou/1'
 
 @dataclass(frozen=True)
@@ -59,15 +61,26 @@ class RewardConfig:
     version:str='task-budget-v2'
     rate_tolerance:float=.02
     @property
-    def progressive(self):return self.version in ('task-budget-v3-progressive','task-budget-v3-progressive-soft-iou',ONLINE_REWARD)
+    def progressive(self):return self.version in ('task-budget-v3-progressive','task-budget-v3-progressive-soft-iou',ONLINE_REWARD,GT_REWARD)
     @property
-    def online(self):return self.version==ONLINE_REWARD
+    def online(self):return self.version in (ONLINE_REWARD,GT_REWARD)
     @property
-    def utility(self):return 'matched_iou_f1_v1' if self.version.endswith('-soft-iou') else TASK
+    def gt_ap(self):return self.version==GT_REWARD
+    @property
+    def utility(self):return 'gt_ap50_95' if self.gt_ap else ('matched_iou_f1_v1' if self.version.endswith('-soft-iou') else TASK)
     def validate(self):
         if self.version not in REWARD_VERSIONS or not 0<=self.rate_tolerance<=.1:
             raise ValueError('Unknown reward version or invalid bitrate tolerance')
         return self
+
+def resolve_reward_config(state_version=LEGACY_STATE,config=None):
+    state_shape(state_version)
+    if config is None:
+        config=RewardConfig(GT_REWARD if state_version==D4_STATE else
+            ONLINE_REWARD if state_version==D3_STATE else COMBINED_REWARD if state_version in D_STATES else 'task-budget-v2')
+    if not isinstance(config,RewardConfig):raise ValueError('Expected a RewardConfig or None')
+    validate_experiment(state_version,config)
+    return config
 
 @dataclass(frozen=True)
 class PPOConfig:
@@ -163,4 +176,14 @@ VALIDATION_SELECTION={
     'cap':'all 20 pairs <= (1+tolerance)*min(target_bits,QPA_bits)',
     'eligible':'BD-rate AP50:95 < 0 and BD-AP50:95 > 0, both defined',
     'reward_unchanged':True,'test_used':False,
+}
+
+# Ground truth belongs to the learner, never the Actor's observation. This is
+# a supervised task-reward experiment; legacy teacher-only rewards stay named.
+TRAINING_REWARD_PROTOCOL={
+    **{k:VALIDATION_SELECTION[k] for k in ('class','confidence','nms_iou','max_dets','fp32','ap','ap_engine','annotation_sha256','mapping')},
+    'schema':'train-gt-ap50-95-budget/1','split':'train','videos':16,
+    'objective':'clip GT AP50:95 minus paired QPA clip GT AP50:95 under original cap',
+    'task_reward':'terminal only; no per-frame AP averaging or teacher mixture',
+    'actor_receives_gt':False,'test_used':False,
 }

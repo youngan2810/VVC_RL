@@ -2,7 +2,7 @@
 import ast,json,sys,subprocess,tempfile
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
-from vvcrl.config import fingerprint
+from vvcrl.config import fingerprint,GT_REWARD,D4_STATE
 from vvcrl.repository import verify_checkout
 
 def verify_runtime(root=ROOT,expected_source_sha256=None):
@@ -40,12 +40,15 @@ def verify_d_series(root=ROOT):
             for node in tree.body:
                 if isinstance(node,ast.Assign):
                     for target in node.targets:
-                        if isinstance(target,ast.Name) and target.id in ('SOURCE_COMMIT','EXPECTED_SOURCE_SHA256','VARIANT','CREDIT_MODE'):
+                        if isinstance(target,ast.Name) and target.id in ('SOURCE_COMMIT','EXPECTED_SOURCE_SHA256','VARIANT','CREDIT_MODE','VARIANTS'):
                             values[target.id]=ast.literal_eval(node.value)
         code='\n'.join(sources);commit=values.get('SOURCE_COMMIT','')
         if len(commit)!=40 or any(c not in '0123456789abcdef' for c in commit):raise ValueError('D-series requires immutable source pin')
         if values.get('EXPECTED_SOURCE_SHA256')!=actual:raise ValueError('D-series functional fingerprint differs: '+name)
         if values.get('VARIANT')!='D4' or values.get('CREDIT_MODE')!='full-clip':raise ValueError('D4 launchers must default to full-clip credit')
+        if values.get('VARIANTS',{}).get('D4')!=(D4_STATE,GT_REWARD):raise ValueError('D4 launcher uses a stale proxy reward: '+name)
+        if 'training_ground_truth' not in code or 'dataset_script,INPUT,FRAMES,STATE_VERSION,REWARD_VERSION' not in code:
+            raise ValueError('D4 launcher lacks authenticated Train GT precheck: '+name)
         if "'--gae-lambda',str(GAE_LAMBDA)" not in code or "GAE_LAMBDA = 1.0 if CREDIT_MODE == 'full-clip' else 0.95" not in code:
             raise ValueError('D4 preflight/train/resume estimator differs: '+name)
         if 'PPOConfig(gae_lambda=float(lam))' not in code or 'STATE_VERSION,REWARD_VERSION,FRAMES,GAE_LAMBDA' not in code:

@@ -2,7 +2,7 @@
 from pathlib import Path
 from dataclasses import asdict
 import json,torch,uuid,itertools,sys
-from .config import Profile,RewardConfig,PPOConfig,atomic_json,LEGACY_STATE,D4_STATE,RATES,resolve_ppo_config
+from .config import Profile,RewardConfig,PPOConfig,atomic_json,LEGACY_STATE,D4_STATE,RATES,resolve_ppo_config,resolve_reward_config
 from .gates import binding,require_gate
 from .model import ActorCritic,model_hash
 from .train import load_checkpoint
@@ -12,7 +12,7 @@ from .collect import collect
 from .artifacts import export_run
 from .validation import validation_summary,rd_validation_summary
 
-def diagnose(root,output,gate,toolchain,input_root,tools,checkpoint,profile=Profile(),reward_config=RewardConfig(),ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE,mode='auto',max_encodes=0):
+def diagnose(root,output,gate,toolchain,input_root,tools,checkpoint,profile=Profile(),reward_config=None,ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE,mode='auto',max_encodes=0):
     """Explicitly bounded D4 GT-RD controls; never select a model or strategy.
 
     D4 uses the same four Val videos/five rates/labels/cap as checkpoint
@@ -20,6 +20,7 @@ def diagnose(root,output,gate,toolchain,input_root,tools,checkpoint,profile=Prof
     historical states. All controls below are declared before metrics are read.
     """
     ppo_config=resolve_ppo_config(state_version,ppo_config)
+    reward_config=resolve_reward_config(state_version,reward_config)
     if mode=='auto':mode='rd' if state_version==D4_STATE else 'legacy'
     if mode not in ('legacy','compact','rd'):raise ValueError('Unknown diagnostic mode')
     rd=mode=='rd'
@@ -89,6 +90,7 @@ def diagnose(root,output,gate,toolchain,input_root,tools,checkpoint,profile=Prof
         raise
     finally:
         name=f'VVC_RL_POLICY_CONTROLS_FAILED_{token}_KAGGLE_SAFE.zip' if sys.exc_info()[0] is not None else 'VVC_RL_POLICY_CONTROLS_KAGGLE_SAFE.zip'
+        if (output.parent/name).exists():name=f'VVC_RL_POLICY_CONTROLS_{token}_KAGGLE_SAFE.zip'
         export_run(output,output.parent/name)
 
 

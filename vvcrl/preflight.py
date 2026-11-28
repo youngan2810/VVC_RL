@@ -3,7 +3,7 @@ from pathlib import Path
 import json,subprocess,sys,time
 import numpy as np
 import torch
-from .config import Profile,PPOConfig,RewardConfig,atomic_json,digest,LEGACY_STATE,resolve_ppo_config
+from .config import Profile,PPOConfig,RewardConfig,atomic_json,digest,LEGACY_STATE,resolve_ppo_config,resolve_reward_config,TRAINING_REWARD_PROTOCOL
 from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash
 from .ppo import PPO,residual_mechanics_ok
@@ -14,8 +14,9 @@ from .artifacts import export_run
 from .train import save_checkpoint,load_checkpoint
 from .reward import RatePrices
 
-def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),workers=2,seed=20261120,reward_config=RewardConfig(),ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE):
+def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),workers=2,seed=20261120,reward_config=None,ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE):
     ppo_config=resolve_ppo_config(state_version,ppo_config)
+    reward_config=resolve_reward_config(state_version,reward_config)
     root=Path(root);output=Path(output);output.mkdir(parents=True,exist_ok=False)
     bind=binding(root,toolchain,profile,workers,reward_config,ppo_config,train_schedule,state_version);checks={k:False for k in required_checks(bind)};evidence=[]
     try:
@@ -24,6 +25,11 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
             val_gt=validation_ground_truth(input_root,profile.frames)
             atomic_json(output/'VALIDATION_GT.json',val_gt)
         else:val_gt={}
+        if reward_config.gt_ap:
+            from .data import training_ground_truth
+            train_gt=training_ground_truth(input_root,profile.frames)
+            atomic_json(output/'TRAINING_GT.json',train_gt)
+        else:train_gt={}
         if workers!=2 or not torch.cuda.is_available() or torch.cuda.device_count()<2:raise RuntimeError('Full Kaggle preflight requires two real CUDA collectors; CPU fixture cannot authorize training')
         unit=output/'unit_contracts.log'
         with unit.open('wb') as f:subprocess.run([sys.executable,'-m','unittest','discover','-s',str(root/'tests'),'-p','test_*.py'],cwd=root,stdout=f,stderr=subprocess.STDOUT,check=True)
@@ -44,7 +50,8 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         def specs(videos,split,snapshot,model,tag):
             return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
               snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),reward_scale=ppo_config.reward_scale,state_version=state_version,video=v,split=split,rate=120,price=1.,
-              seed=seed+i,device=f'cuda:{i}',episode_id=f'{tag}_{i}',validation_gt=val_gt.get(v) if split=='val' else None) for i,v in enumerate(videos)]
+              seed=seed+i,device=f'cuda:{i}',episode_id=f'{tag}_{i}',validation_gt=val_gt.get(v) if split=='val' else None,
+              training_gt=train_gt.get(v) if split=='train' else None) for i,v in enumerate(videos)]
         train=collect(specs(catalog.selected['train'][:2],'train',snapshot,model,'mechanical_train'))
         if {r['device'] for r in train}!={'cuda:0','cuda:1'} or len({r['pid'] for r in train})!=2:raise ValueError('Two-GPU collection contract failed')
         checks['two_gpu_collectors']=True;checks['real_train_rollout']=True
@@ -55,6 +62,14 @@ def full_preflight(root,output,toolchain,input_root,tools,profile=Profile(),work
         checks['actor_head_updated']=stats['actor_head_change']>0 and stats['policy_head_gradient_norm']>0 and residual_mechanics_ok(model,stats)
         checks['critic_head_updated']=stats['critic_head_change']>0
         checks['reward_identity']=all(r['result']['reward_identity_error']<1e-10 for r in train)
+        if reward_config.gt_ap:
+            from .metrics import coco_ap
+            checks['training_gt_ap']=True
+            for row in train:
+                for key in ('training_ap','anchor_training_ap'):
+                    proof=row['result'][key]
+                    checks['training_gt_ap'] &= proof['protocol']==TRAINING_REWARD_PROTOCOL and coco_ap(proof['ground_truth'],proof['predictions'])==proof['metrics'] and proof['metrics']['ap50_95'] is not None
+            checks['training_gt_ap']=bool(checks['training_gt_ap'])
         atomic_json(output/'PPO_MECHANICAL_UPDATE.json',{'before':before,'after':model_hash(model),'stats':stats,'ppo_config':asdict(ppo_config),'train_schedule':train_schedule,'scope':'one train-only update; not evidence of useful policy'})
         after=output/'mechanical_checkpoint.pt';prices=RatePrices();prices.update([r['result'] for r in train],config=reward_config)
         rng=torch.get_rng_state().clone()

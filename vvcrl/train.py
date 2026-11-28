@@ -3,7 +3,7 @@ from pathlib import Path
 import itertools,json,time,uuid,math,sys
 import numpy as np
 import torch
-from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest,LEGACY_STATE,CHECKPOINT_SCHEMA,D_STATES,resolve_ppo_config
+from .config import Profile,PPOConfig,RewardConfig,RATES,atomic_json,digest,LEGACY_STATE,CHECKPOINT_SCHEMA,D_STATES,resolve_ppo_config,resolve_reward_config
 from .locked.data import VideoCatalog
 from .model import ActorCritic,model_hash,state_dict_hash
 from .ppo import PPO,policy_state_diagnostics
@@ -106,9 +106,10 @@ def export_training_run(output,invocation,failed=False):
     destination=output.parent/(name+(f'_FAILED_{invocation}' if failed else '')+'_SAFE.zip')
     return export_run(output,destination)
 
-def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val_every=5,profile=Profile(),seed=20261120,resume=None,authorized=False,hours=10.,reward_config=RewardConfig(),ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE):
+def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val_every=5,profile=Profile(),seed=20261120,resume=None,authorized=False,hours=10.,reward_config=None,ppo_config=None,train_schedule='mixed',state_version=LEGACY_STATE):
     if not authorized:raise RuntimeError('Training disabled: explicitly pass --start-mini-training after reviewing full preflight')
     ppo_config=resolve_ppo_config(state_version,ppo_config)
+    reward_config=resolve_reward_config(state_version,reward_config)
     root=Path(root);output=Path(output);bind=binding(root,toolchain,profile,2,reward_config,ppo_config,train_schedule,state_version);require_gate(preflight,bind)
     if type(updates) is not int or type(val_every) is not int or type(seed) is not int or updates<0 or (updates==0 and not resume) or val_every<1 or seed<0 or not math.isfinite(hours) or not 0<hours<=11.75:raise ValueError('Invalid update budget, seed, validation cadence or hours')
     rd_selection='validation_selection' in bind
@@ -116,6 +117,10 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
         from .data import validation_ground_truth
         val_gt=validation_ground_truth(input_root,profile.frames)
     else:val_gt={}
+    if reward_config.gt_ap:
+        from .data import training_ground_truth
+        train_gt=training_ground_truth(input_root,profile.frames)
+    else:train_gt={}
     run_contract=run_protocol(output,seed,val_every,resume)
     output.mkdir(parents=True,exist_ok=True);protocol=output/'TRAIN_BINDING.json'
     if resume and not protocol.is_file():raise ValueError('Resume training binding missing')
@@ -124,8 +129,11 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
     if not resume:
         atomic_json(protocol,bind);atomic_json(output/'RUN_PROTOCOL.json',run_contract)
         if rd_selection:atomic_json(output/'VALIDATION_GT.json',val_gt)
+        if train_gt:atomic_json(output/'TRAINING_GT.json',train_gt)
     elif rd_selection and json.loads((output/'VALIDATION_GT.json').read_text())!=val_gt:
         raise ValueError('Resume Validation GT coverage/identity differs')
+    if resume and train_gt and json.loads((output/'TRAINING_GT.json').read_text())!=train_gt:
+        raise ValueError('Resume Training GT coverage/identity differs')
     torch.set_num_threads(1);torch.manual_seed(seed)
     model=ActorCritic(state_version);ppo=PPO(model,ppo_config);prices=RatePrices();iteration=episodes=0;best=None if rd_selection else 0.;pending=False
     if resume:
@@ -140,7 +148,8 @@ def mini_train(root,output,preflight,toolchain,input_root,tools,*,updates=10,val
     def specs(items,split,snapshot,tag):
         return [dict(input=str(input_root),output=str(output),tools=str(tools),encoder=str(toolchain['encoder']),decoder=str(toolchain['decoder']),
           snapshot=str(snapshot),model_sha256=model_hash(model),profile=asdict(profile),reward_config=asdict(reward_config),reward_scale=ppo_config.reward_scale,state_version=state_version,video=v,split=split,rate=r,price=prices.values[str(r)],
-          seed=seed+episodes+i,device=f'cuda:{i}',episode_id=f'{invocation}_{tag}_{i}',validation_gt=val_gt.get(v) if split=='val' else None) for i,(v,r) in enumerate(items)]
+          seed=seed+episodes+i,device=f'cuda:{i}',episode_id=f'{invocation}_{tag}_{i}',validation_gt=val_gt.get(v) if split=='val' else None,
+          training_gt=train_gt.get(v) if split=='train' else None) for i,(v,r) in enumerate(items)]
     latest=output/'checkpoints/latest.pt'
     def publish(pending):
         save_checkpoint(latest,model,ppo,prices,iteration,episodes,bind,best,seed)
